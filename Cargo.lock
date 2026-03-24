@@ -3038,6 +3038,7 @@ dependencies = [
  "image",
  "reqwest",
  "rfd",
+ "serde",
  "serde_json",
  "webbrowser",
  "winresource",

@@ -2,14 +2,16 @@
 
 mod app_model;
 mod icon;
+mod progress;
 mod preview;
 mod process_utils;
+mod settings;
 
 use std::{
     fs,
     path::PathBuf,
-    process::Command,
-    sync::Arc,
+    process::{Child, Command},
+    sync::{Arc, Mutex},
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
@@ -25,9 +27,11 @@ use eframe::{
 };
 use image::{ImageBuffer, Rgba};
 use icon::load_app_icon;
+use progress::{DownloadProgress, ProgressPhase};
 use preview::fetch_media_preview;
-use process_utils::{configure_background_command, run_command_streaming};
+use process_utils::{cancel_child_process, configure_background_command, run_command_streaming, run_command_streaming_with_handle};
 use rfd::FileDialog;
+use settings::{AppSettings, load_settings, save_settings};
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions {
@@ -61,6 +65,9 @@ struct RustTubeApp {
     preview_requested_url: String,
     preview: Option<MediaPreview>,
     preview_texture: Option<TextureHandle>,
+    progress: DownloadProgress,
+    active_child: Arc<Mutex<Option<Child>>>,
+    last_saved_settings: Option<AppSettings>,
 }
 
 impl Default for RustTubeApp {
@@ -68,10 +75,23 @@ impl Default for RustTubeApp {
         let (worker_tx, worker_rx) = mpsc::channel();
         let downloads_dir = UserDirs::new().map(|dirs| dirs.download_dir().unwrap_or(dirs.home_dir()).to_path_buf());
         let tool_paths = find_tool_paths();
-        let download_path = downloads_dir
+        let mut download_path = downloads_dir
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
+        let mut mode = DownloadMode::Video;
+        let mut quality = QualityPreset::Best;
+        let mut last_url = String::new();
+
+        if let Some(saved) = load_settings() {
+            let (saved_download_path, saved_mode, saved_quality, saved_last_url) = saved.apply_to_runtime();
+            if !saved_download_path.trim().is_empty() {
+                download_path = saved_download_path;
+            }
+            mode = saved_mode;
+            quality = saved_quality;
+            last_url = saved_last_url;
+        }
 
         let status = match (&tool_paths, &downloads_dir) {
             (Some(_paths), Some(_downloads)) => String::new(),
@@ -79,10 +99,13 @@ impl Default for RustTubeApp {
             (_, None) => "Error: Could not determine the Windows Downloads folder.".to_owned(),
         };
 
+        let initial_settings =
+            AppSettings::from_runtime(download_path.clone(), &mode, &quality, last_url.clone());
+
         Self {
-            url: String::new(),
-            mode: DownloadMode::Video,
-            quality: QualityPreset::Best,
+            url: last_url,
+            mode,
+            quality,
             formats: Vec::new(),
             selected_format: 0,
             status,
@@ -99,6 +122,9 @@ impl Default for RustTubeApp {
             preview_requested_url: String::new(),
             preview: None,
             preview_texture: None,
+            progress: DownloadProgress::default(),
+            active_child: Arc::new(Mutex::new(None)),
+            last_saved_settings: Some(initial_settings),
         }
     }
 }
@@ -107,15 +133,30 @@ impl App for RustTubeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         self.maybe_start_preview_fetch();
         self.handle_worker_events(ctx);
+        self.persist_settings_if_needed();
 
-        egui::SidePanel::right("preview_panel")
-            .min_width(320.0)
-            .max_width(320.0)
+        egui::SidePanel::right("preview_sidebar")
             .resizable(false)
+            .min_width(340.0)
+            .max_width(340.0)
             .show(ctx, |ui| {
                 ui.heading("Preview");
                 ui.add_space(10.0);
                 self.render_preview(ui);
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.label(RichText::new("Links").strong());
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Website").clicked() {
+                        let _ = webbrowser::open("https://jonasgrimm.de");
+                    }
+
+                    if ui.button("GitHub").clicked() {
+                        let _ = webbrowser::open("https://github.com/beqare/RustTube");
+                    }
+                });
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -202,6 +243,34 @@ impl App for RustTubeApp {
                 if ui.add_enabled(can_download, egui::Button::new("Start download")).clicked() {
                     self.start_download();
                 }
+
+                let can_cancel = self.downloading;
+                if ui.add_enabled(can_cancel, egui::Button::new("Cancel")).clicked() {
+                    match cancel_child_process(&self.active_child) {
+                        Ok(true) => {
+                            self.status = "Cancel requested...".to_owned();
+                            self.progress.phase = ProgressPhase::Canceled;
+                        }
+                        Ok(false) => {
+                            self.status = "No active download to cancel.".to_owned();
+                        }
+                        Err(error) => {
+                            self.status = error;
+                        }
+                    }
+                }
+
+                let can_open_folder = self.target_download_dir().is_some();
+                if ui
+                    .add_enabled(can_open_folder, egui::Button::new("Open folder"))
+                    .clicked()
+                {
+                    if let Some(path) = self.target_download_dir() {
+                        if let Err(error) = open_in_file_explorer(&path) {
+                            self.status = error;
+                        }
+                    }
+                }
             });
 
             if self.mode == DownloadMode::Manual {
@@ -230,6 +299,11 @@ impl App for RustTubeApp {
             if !self.status.trim().is_empty() {
                 ui.add_space(12.0);
                 ui.label(RichText::new(&self.status).strong());
+            }
+
+            if self.loading_formats || self.downloading || self.progress.percent.is_some() {
+                ui.add_space(10.0);
+                self.render_progress(ui);
             }
 
             ui.add_space(10.0);
@@ -332,6 +406,7 @@ impl RustTubeApp {
             match event {
                 WorkerEvent::LogChunk(chunk) => {
                     self.logs.push_str(&chunk);
+                    self.progress.update_from_chunk(&chunk);
                 }
                 WorkerEvent::PreviewLoaded { url, preview, error } => {
                     if url != self.url.trim() {
@@ -370,6 +445,7 @@ impl RustTubeApp {
                 }
                 WorkerEvent::FormatsLoaded { entries } => {
                     self.loading_formats = false;
+                    self.progress.reset();
                     if entries.is_empty() {
                         self.status = "No formats detected. Some sites expose only a few or unusual streams.".to_owned();
                     } else {
@@ -378,10 +454,20 @@ impl RustTubeApp {
                     }
                     self.formats = entries;
                 }
-                WorkerEvent::DownloadFinished { success } => {
+                WorkerEvent::DownloadFinished { success, canceled } => {
                     self.downloading = false;
+                    if success {
+                        self.progress.phase = ProgressPhase::Finished;
+                        self.progress.percent = Some(1.0);
+                    } else if canceled || self.progress.phase == ProgressPhase::Canceled {
+                        self.progress.phase = ProgressPhase::Canceled;
+                    } else {
+                        self.progress.phase = ProgressPhase::Failed;
+                    }
                     self.status = if success {
                         "Download finished.".to_owned()
+                    } else if canceled || self.progress.phase == ProgressPhase::Canceled {
+                        "Download canceled.".to_owned()
                     } else {
                         "Download failed. See the log for details.".to_owned()
                     };
@@ -499,6 +585,8 @@ impl RustTubeApp {
         self.status = "Loading available formats...".to_owned();
         self.logs.clear();
         self.log_auto_scroll = true;
+        self.progress.reset();
+        self.progress.phase = ProgressPhase::Preparing;
         let sender = self.worker_tx.clone();
 
         thread::spawn(move || {
@@ -586,22 +674,31 @@ impl RustTubeApp {
         self.status = "Download in progress...".to_owned();
         self.logs.clear();
         self.log_auto_scroll = true;
+        self.progress.reset();
+        self.progress.phase = ProgressPhase::Preparing;
         let sender = self.worker_tx.clone();
+        let child_slot = Arc::clone(&self.active_child);
 
         thread::spawn(move || {
             let mut command = Command::new(&tool_paths.yt_dlp_path);
             command.args(tool_command_prefix(&tool_paths.lib_dir)).args(&args);
             configure_background_command(&mut command);
 
-            let result = run_command_streaming(command, &sender);
+            let result = run_command_streaming_with_handle(command, &sender, Some(child_slot));
             let error_log = result
                 .as_ref()
                 .err()
                 .map(|error| format!("Failed to start yt-dlp: {error}\n"));
 
             let event = match result {
-                Ok((success, _output)) => WorkerEvent::DownloadFinished { success },
-                Err(_error) => WorkerEvent::DownloadFinished { success: false },
+                Ok((success, output)) => WorkerEvent::DownloadFinished {
+                    success,
+                    canceled: output.to_ascii_lowercase().contains("terminated"),
+                },
+                Err(_error) => WorkerEvent::DownloadFinished {
+                    success: false,
+                    canceled: false,
+                },
             };
 
             if let Some(error_log) = error_log {
@@ -618,6 +715,48 @@ impl RustTubeApp {
         }
 
         Some(PathBuf::from(trimmed))
+    }
+
+    fn persist_settings_if_needed(&mut self) {
+        let current = AppSettings::from_runtime(
+            self.download_path.clone(),
+            &self.mode,
+            &self.quality,
+            self.url.clone(),
+        );
+
+        if self.last_saved_settings.as_ref() == Some(&current) {
+            return;
+        }
+
+        if save_settings(&current).is_ok() {
+            self.last_saved_settings = Some(current);
+        }
+    }
+
+    fn render_progress(&self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(self.progress.label()).strong());
+                if let Some(speed) = &self.progress.speed {
+                    ui.label(format!("Speed: {speed}"));
+                }
+                if let Some(eta) = &self.progress.eta {
+                    ui.label(format!("ETA: {eta}"));
+                }
+            });
+
+            let progress_value = self.progress.percent.unwrap_or(0.0);
+            ui.add(
+                egui::ProgressBar::new(progress_value)
+                    .show_percentage()
+                    .desired_width(f32::INFINITY),
+            );
+
+            if let Some(file) = &self.progress.current_file {
+                ui.label(format!("Current file: {file}"));
+            }
+        });
     }
 }
 
@@ -659,5 +798,34 @@ fn sanitize_file_name(value: &str) -> String {
         "thumbnail".to_owned()
     } else {
         trimmed.to_owned()
+    }
+}
+
+fn open_in_file_explorer(path: &PathBuf) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("Could not open folder: {error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("Could not open folder: {error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("Could not open folder: {error}"))?;
+        Ok(())
     }
 }

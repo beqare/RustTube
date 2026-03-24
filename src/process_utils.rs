@@ -1,6 +1,6 @@
 use std::{
     io::Read,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     sync::mpsc::Sender,
     thread,
@@ -21,12 +21,27 @@ pub fn configure_background_command(command: &mut Command) {
     }
 }
 
-pub fn run_command_streaming(mut command: Command, sender: &Sender<WorkerEvent>) -> Result<(bool, String), String> {
+pub fn run_command_streaming(command: Command, sender: &Sender<WorkerEvent>) -> Result<(bool, String), String> {
+    run_command_streaming_with_handle(command, sender, None)
+}
+
+pub fn run_command_streaming_with_handle(
+    mut command: Command,
+    sender: &Sender<WorkerEvent>,
+    child_slot: Option<Arc<Mutex<Option<Child>>>>,
+) -> Result<(bool, String), String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| format!("could not launch process: {error}"))?;
+
+    let mut child = child;
+    if let Some(slot) = &child_slot {
+        let mut child_guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
+        *child_guard = Some(child);
+        child = child_guard.take().ok_or_else(|| "missing spawned child process".to_owned())?;
+    }
 
     let stdout = child
         .stdout
@@ -54,7 +69,23 @@ pub fn run_command_streaming(mut command: Command, sender: &Sender<WorkerEvent>)
         Err(buffer) => buffer.lock().map(|text| text.clone()).unwrap_or_default(),
     };
 
+    if let Some(slot) = &child_slot
+        && let Ok(mut child_guard) = slot.lock()
+    {
+        *child_guard = None;
+    }
+
     Ok((status.success(), output))
+}
+
+pub fn cancel_child_process(slot: &Arc<Mutex<Option<Child>>>) -> Result<bool, String> {
+    let mut guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
+    let Some(child) = guard.as_mut() else {
+        return Ok(false);
+    };
+
+    child.kill().map_err(|error| format!("failed to stop process: {error}"))?;
+    Ok(true)
 }
 
 fn spawn_stream_reader<R: Read + Send + 'static>(

@@ -72,6 +72,7 @@ pub enum WorkerEvent {
     },
     DownloadFinished {
         success: bool,
+        canceled: bool,
     },
 }
 
