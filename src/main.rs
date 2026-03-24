@@ -1,12 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
-    sync::Arc,
+    process::{Command, Stdio},
+    sync::{Arc, Mutex},
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 use directories::UserDirs;
 use eframe::{
@@ -14,6 +18,10 @@ use eframe::{
     egui::{self, Color32, RichText},
 };
 use ico::IconDir;
+use rfd::FileDialog;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions {
@@ -82,13 +90,12 @@ struct ToolPaths {
 }
 
 enum WorkerEvent {
+    LogChunk(String),
     FormatsLoaded {
         entries: Vec<FormatEntry>,
-        raw_output: String,
     },
     DownloadFinished {
         success: bool,
-        output: String,
     },
 }
 
@@ -100,12 +107,14 @@ struct RustTubeApp {
     selected_format: usize,
     status: String,
     logs: String,
-    downloads_dir: Option<PathBuf>,
+    default_downloads_dir: Option<PathBuf>,
+    download_path: String,
     tool_paths: Option<ToolPaths>,
     worker_tx: Sender<WorkerEvent>,
     worker_rx: Receiver<WorkerEvent>,
     loading_formats: bool,
     downloading: bool,
+    log_auto_scroll: bool,
 }
 
 impl Default for RustTubeApp {
@@ -113,6 +122,10 @@ impl Default for RustTubeApp {
         let (worker_tx, worker_rx) = mpsc::channel();
         let downloads_dir = UserDirs::new().map(|dirs| dirs.download_dir().unwrap_or(dirs.home_dir()).to_path_buf());
         let tool_paths = find_tool_paths();
+        let download_path = downloads_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
 
         let status = match (&tool_paths, &downloads_dir) {
             (Some(paths), Some(downloads)) => format!(
@@ -132,12 +145,14 @@ impl Default for RustTubeApp {
             selected_format: 0,
             status,
             logs: String::new(),
-            downloads_dir,
+            default_downloads_dir: downloads_dir,
+            download_path,
             tool_paths,
             worker_tx,
             worker_rx,
             loading_formats: false,
             downloading: false,
+            log_auto_scroll: true,
         }
     }
 }
@@ -186,6 +201,39 @@ impl App for RustTubeApp {
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {
+                ui.label("Target folder:");
+                ui.add_sized(
+                    [560.0, 24.0],
+                    egui::TextEdit::singleline(&mut self.download_path)
+                        .hint_text("C:\\Users\\...\\Downloads")
+                        .interactive(false),
+                );
+
+                if ui.button("Browse...").clicked() {
+                    let mut dialog = FileDialog::new();
+
+                    if let Some(current_path) = self.target_download_dir() {
+                        dialog = dialog.set_directory(current_path);
+                    } else if let Some(default_path) = &self.default_downloads_dir {
+                        dialog = dialog.set_directory(default_path);
+                    }
+
+                    if let Some(selected_folder) = dialog.pick_folder() {
+                        self.download_path = selected_folder.display().to_string();
+                    }
+                }
+
+                let can_reset = self.default_downloads_dir.is_some();
+                if ui.add_enabled(can_reset, egui::Button::new("Use default")).clicked() {
+                    if let Some(path) = &self.default_downloads_dir {
+                        self.download_path = path.display().to_string();
+                    }
+                }
+            });
+
+            ui.add_space(10.0);
+
+            ui.horizontal(|ui| {
                 let can_fetch = !self.loading_formats && self.can_run_commands();
                 if ui.add_enabled(can_fetch, egui::Button::new("Load formats")).clicked() {
                     self.load_formats();
@@ -223,17 +271,36 @@ impl App for RustTubeApp {
             ui.add_space(12.0);
             ui.label(RichText::new(&self.status).strong());
 
-            if let Some(downloads) = &self.downloads_dir {
-                ui.label(format!("Target folder: {}", downloads.display()));
-            }
-
             ui.add_space(10.0);
-            ui.label("Output / Log:");
-            ui.add(
-                egui::TextEdit::multiline(&mut self.logs)
-                    .desired_rows(22)
-                    .desired_width(f32::INFINITY),
-            );
+            ui.horizontal(|ui| {
+                ui.label("Output / Log:");
+
+                if ui
+                    .add_enabled(!self.log_auto_scroll, egui::Button::new("Follow latest"))
+                    .clicked()
+                {
+                    self.log_auto_scroll = true;
+                }
+            });
+
+            let scroll_output = egui::ScrollArea::vertical()
+                .id_salt("log_scroll_area")
+                .stick_to_bottom(self.log_auto_scroll)
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.logs)
+                            .desired_width(f32::INFINITY)
+                            .interactive(false)
+                            .font(egui::TextStyle::Monospace),
+                    )
+                });
+
+            let user_scrolled = scroll_output.inner.hovered()
+                && ui.input(|input| input.raw_scroll_delta.y.abs() > 0.0);
+            if user_scrolled {
+                self.log_auto_scroll = false;
+            }
         });
 
         if self.loading_formats || self.downloading {
@@ -244,7 +311,7 @@ impl App for RustTubeApp {
 
 impl RustTubeApp {
     fn can_run_commands(&self) -> bool {
-        self.tool_paths.is_some() && self.downloads_dir.is_some() && !self.url.trim().is_empty()
+        self.tool_paths.is_some() && !self.url.trim().is_empty() && self.target_download_dir().is_some()
     }
 
     fn can_start_download(&self) -> bool {
@@ -258,9 +325,11 @@ impl RustTubeApp {
     fn handle_worker_events(&mut self) {
         while let Ok(event) = self.worker_rx.try_recv() {
             match event {
-                WorkerEvent::FormatsLoaded { entries, raw_output } => {
+                WorkerEvent::LogChunk(chunk) => {
+                    self.logs.push_str(&chunk);
+                }
+                WorkerEvent::FormatsLoaded { entries } => {
                     self.loading_formats = false;
-                    self.logs = raw_output;
                     if entries.is_empty() {
                         self.status = "No formats detected. Some sites expose only a few or unusual streams.".to_owned();
                     } else {
@@ -269,9 +338,8 @@ impl RustTubeApp {
                     }
                     self.formats = entries;
                 }
-                WorkerEvent::DownloadFinished { success, output } => {
+                WorkerEvent::DownloadFinished { success } => {
                     self.downloading = false;
-                    self.logs = output;
                     self.status = if success {
                         "Download finished.".to_owned()
                     } else {
@@ -296,31 +364,35 @@ impl RustTubeApp {
 
         self.loading_formats = true;
         self.status = "Loading available formats...".to_owned();
+        self.logs.clear();
+        self.log_auto_scroll = true;
         let sender = self.worker_tx.clone();
 
         thread::spawn(move || {
-            let result = Command::new(&tool_paths.yt_dlp_path)
+            let mut command = Command::new(&tool_paths.yt_dlp_path);
+            command
                 .args(tool_command_prefix(&tool_paths.lib_dir))
-                .args(["-F".to_owned(), url])
-                .output();
+                .args(["-F".to_owned(), url]);
+            configure_background_command(&mut command);
+
+            let result = run_command_streaming(command, &sender);
+            let error_log = result
+                .as_ref()
+                .err()
+                .map(|error| format!("Failed to start yt-dlp: {error}\n"));
+
             let event = match result {
-                Ok(output) => {
-                    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-                    if !output.stderr.is_empty() {
-                        text.push_str("\n\n");
-                        text.push_str(&String::from_utf8_lossy(&output.stderr));
-                    }
-                    WorkerEvent::FormatsLoaded {
-                        entries: parse_formats(&text),
-                        raw_output: text,
-                    }
-                }
-                Err(error) => WorkerEvent::FormatsLoaded {
+                Ok((_success, output)) => WorkerEvent::FormatsLoaded {
+                    entries: parse_formats(&output),
+                },
+                Err(_error) => WorkerEvent::FormatsLoaded {
                     entries: Vec::new(),
-                    raw_output: format!("Failed to start yt-dlp: {error}"),
                 },
             };
 
+            if let Some(error_log) = error_log {
+                let _ = sender.send(WorkerEvent::LogChunk(error_log));
+            }
             let _ = sender.send(event);
         });
     }
@@ -330,8 +402,8 @@ impl RustTubeApp {
             self.status = "yt-dlp.exe is missing in lib/.".to_owned();
             return;
         };
-        let Some(downloads_dir) = self.downloads_dir.clone() else {
-            self.status = "Could not find the Downloads folder.".to_owned();
+        let Some(downloads_dir) = self.target_download_dir() else {
+            self.status = "Please enter a valid target folder.".to_owned();
             return;
         };
 
@@ -377,34 +449,44 @@ impl RustTubeApp {
 
         self.downloading = true;
         self.status = "Download in progress...".to_owned();
+        self.logs.clear();
+        self.log_auto_scroll = true;
         let sender = self.worker_tx.clone();
 
         thread::spawn(move || {
-            let result = Command::new(&tool_paths.yt_dlp_path)
+            let mut command = Command::new(&tool_paths.yt_dlp_path);
+            command
                 .args(tool_command_prefix(&tool_paths.lib_dir))
-                .args(&args)
-                .output();
+                .args(&args);
+            configure_background_command(&mut command);
+
+            let result = run_command_streaming(command, &sender);
+            let error_log = result
+                .as_ref()
+                .err()
+                .map(|error| format!("Failed to start yt-dlp: {error}\n"));
+
             let event = match result {
-                Ok(output) => {
-                    let success = output.status.success();
-                    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-                    if !output.stderr.is_empty() {
-                        text.push_str("\n\n");
-                        text.push_str(&String::from_utf8_lossy(&output.stderr));
-                    }
-                    WorkerEvent::DownloadFinished {
-                        success,
-                        output: text,
-                    }
-                }
-                Err(error) => WorkerEvent::DownloadFinished {
+                Ok((success, _output)) => WorkerEvent::DownloadFinished { success },
+                Err(_error) => WorkerEvent::DownloadFinished {
                     success: false,
-                    output: format!("Failed to start yt-dlp: {error}"),
                 },
             };
 
+            if let Some(error_log) = error_log {
+                let _ = sender.send(WorkerEvent::LogChunk(error_log));
+            }
             let _ = sender.send(event);
         });
+    }
+
+    fn target_download_dir(&self) -> Option<PathBuf> {
+        let trimmed = self.download_path.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        Some(PathBuf::from(trimmed))
     }
 }
 
@@ -516,4 +598,73 @@ fn load_app_icon() -> egui::IconData {
         width: image.width(),
         height: image.height(),
     }
+}
+
+fn configure_background_command(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+fn run_command_streaming(mut command: Command, sender: &Sender<WorkerEvent>) -> Result<(bool, String), String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("could not launch process: {error}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "could not capture stdout".to_owned())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "could not capture stderr".to_owned())?;
+
+    let combined_output = Arc::new(Mutex::new(String::new()));
+
+    let stdout_handle = spawn_stream_reader(stdout, sender.clone(), Arc::clone(&combined_output));
+    let stderr_handle = spawn_stream_reader(stderr, sender.clone(), Arc::clone(&combined_output));
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("failed while waiting for process: {error}"))?;
+
+    let _ = stdout_handle.join();
+    let _ = stderr_handle.join();
+
+    let output = match Arc::try_unwrap(combined_output) {
+        Ok(buffer) => buffer.into_inner().unwrap_or_default(),
+        Err(buffer) => buffer.lock().map(|text| text.clone()).unwrap_or_default(),
+    };
+
+    Ok((status.success(), output))
+}
+
+fn spawn_stream_reader<R: Read + Send + 'static>(
+    mut reader: R,
+    sender: Sender<WorkerEvent>,
+    output: Arc<Mutex<String>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 2048];
+
+        loop {
+            let bytes_read = match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => count,
+                Err(_) => break,
+            };
+
+            let chunk = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+
+            if let Ok(mut text) = output.lock() {
+                text.push_str(&chunk);
+            }
+
+            let _ = sender.send(WorkerEvent::LogChunk(chunk));
+        }
+    })
 }
