@@ -62,6 +62,9 @@ pub struct MediaPreview {
 
 pub enum WorkerEvent {
     LogChunk(String),
+    ToolsReady {
+        result: Result<ToolPaths, String>,
+    },
     PreviewLoaded {
         url: String,
         preview: Option<MediaPreview>,
@@ -139,27 +142,6 @@ pub fn tool_command_prefix(lib_dir: &std::path::Path) -> Vec<String> {
     }
 
     args
-}
-
-pub fn find_tool_paths() -> Option<ToolPaths> {
-    let mut candidates = Vec::new();
-
-    if let Ok(current_dir) = std::env::current_dir() {
-        candidates.push(current_dir.join("lib"));
-    }
-
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            candidates.push(exe_dir.join("lib"));
-            candidates.push(exe_dir.join("..").join("lib"));
-            candidates.push(exe_dir.join("..").join("..").join("lib"));
-        }
-    }
-
-    candidates.into_iter().find_map(|lib_dir| {
-        let yt_dlp_path = lib_dir.join("yt-dlp.exe");
-        yt_dlp_path.is_file().then_some(ToolPaths { lib_dir, yt_dlp_path })
-    })
 }
 
 pub fn find_deno_in_lib(lib_dir: &std::path::Path) -> Option<PathBuf> {

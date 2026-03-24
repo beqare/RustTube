@@ -5,6 +5,7 @@ mod icon;
 mod progress;
 mod preview;
 mod process_utils;
+mod runtime_tools;
 mod settings;
 
 use std::{
@@ -18,7 +19,7 @@ use std::{
 
 use app_model::{
     DownloadMode, FormatEntry, MediaPreview, QualityPreset, ToolPaths, WorkerEvent, audio_quality,
-    find_tool_paths, parse_formats, tool_command_prefix, video_selector,
+    parse_formats, tool_command_prefix, video_selector,
 };
 use directories::UserDirs;
 use eframe::{
@@ -34,6 +35,7 @@ use process_utils::{
     run_command_streaming, run_command_streaming_with_handle,
 };
 use rfd::FileDialog;
+use runtime_tools::{ensure_runtime_tools, missing_tools, resolve_lib_dir, tool_paths_if_ready};
 use settings::{AppSettings, load_settings, save_settings};
 
 fn main() -> eframe::Result<()> {
@@ -58,9 +60,11 @@ struct RustTubeApp {
     logs: String,
     default_downloads_dir: Option<PathBuf>,
     download_path: String,
+    lib_dir: PathBuf,
     tool_paths: Option<ToolPaths>,
     worker_tx: Sender<WorkerEvent>,
     worker_rx: Receiver<WorkerEvent>,
+    tool_installing: bool,
     loading_formats: bool,
     downloading: bool,
     cancel_requested: bool,
@@ -78,7 +82,8 @@ impl Default for RustTubeApp {
     fn default() -> Self {
         let (worker_tx, worker_rx) = mpsc::channel();
         let downloads_dir = UserDirs::new().map(|dirs| dirs.download_dir().unwrap_or(dirs.home_dir()).to_path_buf());
-        let tool_paths = find_tool_paths();
+        let lib_dir = resolve_lib_dir();
+        let tool_paths = tool_paths_if_ready(&lib_dir);
         let mut download_path = downloads_dir
             .as_ref()
             .map(|path| path.display().to_string())
@@ -97,16 +102,19 @@ impl Default for RustTubeApp {
             last_url = saved_last_url;
         }
 
-        let status = match (&tool_paths, &downloads_dir) {
-            (Some(_paths), Some(_downloads)) => String::new(),
-            (None, _) => "Error: lib/yt-dlp.exe was not found.".to_owned(),
-            (_, None) => "Error: Could not determine the Windows Downloads folder.".to_owned(),
+        let missing = missing_tools(&lib_dir);
+        let should_install_tools = !missing.is_empty();
+
+        let status = match (&tool_paths, &downloads_dir, should_install_tools) {
+            (Some(_paths), Some(_downloads), false) => String::new(),
+            (_, None, _) => "Error: Could not determine the Windows Downloads folder.".to_owned(),
+            _ => format!("Downloading required tools: {}", missing.join(", ")),
         };
 
         let initial_settings =
             AppSettings::from_runtime(download_path.clone(), &mode, &quality, last_url.clone());
 
-        Self {
+        let mut app = Self {
             url: last_url,
             mode,
             quality,
@@ -116,9 +124,11 @@ impl Default for RustTubeApp {
             logs: String::new(),
             default_downloads_dir: downloads_dir,
             download_path,
+            lib_dir,
             tool_paths,
             worker_tx,
             worker_rx,
+            tool_installing: false,
             loading_formats: false,
             downloading: false,
             cancel_requested: false,
@@ -130,7 +140,13 @@ impl Default for RustTubeApp {
             progress: DownloadProgress::default(),
             active_child: Arc::new(Mutex::new(None)),
             last_saved_settings: Some(initial_settings),
+        };
+
+        if should_install_tools {
+            app.start_runtime_tool_install();
         }
+
+        app
     }
 }
 
@@ -239,6 +255,14 @@ impl App for RustTubeApp {
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {
+                let can_install_tools = !self.tool_installing && self.tool_paths.is_none();
+                if ui
+                    .add_enabled(can_install_tools, egui::Button::new("Install tools"))
+                    .clicked()
+                {
+                    self.start_runtime_tool_install();
+                }
+
                 let can_fetch = !self.loading_formats && self.can_run_commands();
                 if ui.add_enabled(can_fetch, egui::Button::new("Load formats")).clicked() {
                     self.load_formats();
@@ -406,7 +430,7 @@ impl RustTubeApp {
     }
 
     fn can_run_commands(&self) -> bool {
-        self.tool_paths.is_some() && !self.url.trim().is_empty() && self.target_download_dir().is_some()
+        !self.tool_installing && self.tool_paths.is_some() && !self.url.trim().is_empty() && self.target_download_dir().is_some()
     }
 
     fn can_start_download(&self) -> bool {
@@ -490,8 +514,43 @@ impl RustTubeApp {
                         "Download failed. See the log for details.".to_owned()
                     };
                 }
+                WorkerEvent::ToolsReady { result } => {
+                    self.tool_installing = false;
+                    match result {
+                        Ok(tool_paths) => {
+                            self.tool_paths = Some(tool_paths);
+                            self.status.clear();
+                        }
+                        Err(error) => {
+                            self.tool_paths = None;
+                            self.status = error;
+                        }
+                    }
+                }
             }
         }
+    }
+
+    fn start_runtime_tool_install(&mut self) {
+        if self.tool_installing {
+            return;
+        }
+
+        self.tool_installing = true;
+        self.logs.clear();
+        self.log_auto_scroll = true;
+        self.status = format!(
+            "Downloading required tools: {}",
+            missing_tools(&self.lib_dir).join(", ")
+        );
+
+        let sender = self.worker_tx.clone();
+        let lib_dir = self.lib_dir.clone();
+
+        thread::spawn(move || {
+            let result = ensure_runtime_tools(&sender, &lib_dir);
+            let _ = sender.send(WorkerEvent::ToolsReady { result });
+        });
     }
 
     fn render_preview(&mut self, ui: &mut egui::Ui) {
@@ -588,8 +647,13 @@ impl RustTubeApp {
     }
 
     fn load_formats(&mut self) {
+        if self.tool_installing {
+            self.status = "Please wait while the required tools finish downloading.".to_owned();
+            return;
+        }
+
         let Some(tool_paths) = self.tool_paths.clone() else {
-            self.status = "yt-dlp.exe is missing in lib/.".to_owned();
+            self.start_runtime_tool_install();
             return;
         };
 
@@ -635,8 +699,13 @@ impl RustTubeApp {
     }
 
     fn start_download(&mut self) {
+        if self.tool_installing {
+            self.status = "Please wait while the required tools finish downloading.".to_owned();
+            return;
+        }
+
         let Some(tool_paths) = self.tool_paths.clone() else {
-            self.status = "yt-dlp.exe is missing in lib/.".to_owned();
+            self.start_runtime_tool_install();
             return;
         };
         let Some(downloads_dir) = self.target_download_dir() else {
