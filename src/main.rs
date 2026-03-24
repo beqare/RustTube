@@ -44,8 +44,8 @@ use settings::{AppSettings, load_settings, save_settings, settings_dir_path};
 fn main() -> eframe::Result<()> {
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 760.0])
-            .with_min_inner_size([1040.0, 700.0])
+            .with_inner_size([1040.0, 760.0])
+            .with_min_inner_size([1040.0, 760.0])
             .with_icon(Arc::new(load_app_icon())),
         ..Default::default()
     };
@@ -194,6 +194,10 @@ impl App for RustTubeApp {
 
                     if ui.button("GitHub").clicked() {
                         let _ = webbrowser::open("https://github.com/beqare/RustTube");
+                    }
+
+                    if ui.button("Sponsor").clicked() {
+                        let _ = webbrowser::open("https://github.com/sponsors/beqare?frequency=one-time");
                     }
                 });
             });
@@ -650,14 +654,6 @@ impl RustTubeApp {
                     "No thumbnail was provided for this media."
                 };
                 ui.colored_label(Color32::GRAY, cover_status);
-            }
-
-            if self.mode == DownloadMode::AudioMp3 {
-                ui.add_space(6.0);
-                ui.colored_label(
-                    Color32::LIGHT_GREEN,
-                    "MP3 downloads include metadata and embedded cover art when yt-dlp provides it.",
-                );
             }
         });
     }
