@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Ensure stable Rust toolchain
+        shell: powershell
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: Fetch runtime tools
+        shell: powershell
+        run: .\scripts\fetch-runtime-tools.ps1
+
+      - name: Build app package and installer
+        shell: cmd
+        run: .\scripts\build.bat 2
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustTube-Setup
+          path: dist/installer/RustTube-Setup.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        shell: powershell
+        run: |
+          $installer = "dist/installer/RustTube-Setup.exe"
+          gh release view $env:TAG_NAME 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:TAG_NAME $installer --title $env:TAG_NAME --generate-notes
+          } else {
+            gh release upload $env:TAG_NAME $installer --clobber
+          }
