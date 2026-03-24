@@ -25,7 +25,7 @@ impl DownloadProgress {
     }
 
     pub fn update_from_chunk(&mut self, chunk: &str) {
-        for line in chunk.lines() {
+        for line in chunk.split(['\n', '\r']) {
             self.update_from_line(line.trim());
         }
     }
@@ -71,6 +71,11 @@ impl DownloadProgress {
                     ["ETA", eta] => self.eta = Some((*eta).to_owned()),
                     _ => {}
                 }
+            }
+
+            if trimmed.contains("has already been downloaded") {
+                self.phase = ProgressPhase::Finished;
+                self.percent = Some(1.0);
             }
 
             return;
