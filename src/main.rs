@@ -296,6 +296,8 @@ impl App for RustTubeApp {
                 }
             }
 
+            let content_width = ui.available_width();
+
             if !self.status.trim().is_empty() {
                 ui.add_space(12.0);
                 ui.label(RichText::new(&self.status).strong());
@@ -303,7 +305,10 @@ impl App for RustTubeApp {
 
             if self.loading_formats || self.downloading || self.progress.percent.is_some() {
                 ui.add_space(10.0);
-                self.render_progress(ui);
+                ui.scope(|ui| {
+                    ui.set_max_width(content_width);
+                    self.render_progress(ui);
+                });
             }
 
             ui.add_space(10.0);
@@ -318,21 +323,26 @@ impl App for RustTubeApp {
                 }
             });
 
-            let scroll_output = egui::ScrollArea::vertical()
-                .id_salt("log_scroll_area")
-                .stick_to_bottom(self.log_auto_scroll)
-                .max_height(360.0)
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.logs)
-                            .desired_width(f32::INFINITY)
-                            .interactive(false)
-                            .font(egui::TextStyle::Monospace),
-                    )
-                });
+            let scroll_output = ui.scope(|ui| {
+                ui.set_max_width(content_width);
+                egui::ScrollArea::vertical()
+                    .id_salt("log_scroll_area")
+                    .stick_to_bottom(self.log_auto_scroll)
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        let width = ui.available_width();
+                        ui.add_sized(
+                            [width, 0.0],
+                            egui::TextEdit::multiline(&mut self.logs)
+                                .desired_width(width)
+                                .interactive(false)
+                                .font(egui::TextStyle::Monospace),
+                        )
+                    })
+            });
 
             let user_scrolled =
-                scroll_output.inner.hovered() && ui.input(|input| input.raw_scroll_delta.y.abs() > 0.0);
+                scroll_output.inner.inner.hovered() && ui.input(|input| input.raw_scroll_delta.y.abs() > 0.0);
             if user_scrolled {
                 self.log_auto_scroll = false;
             }
@@ -736,6 +746,7 @@ impl RustTubeApp {
 
     fn render_progress(&self, ui: &mut egui::Ui) {
         ui.group(|ui| {
+            let width = ui.available_width();
             ui.horizontal(|ui| {
                 ui.label(RichText::new(self.progress.label()).strong());
                 if let Some(speed) = &self.progress.speed {
@@ -747,10 +758,11 @@ impl RustTubeApp {
             });
 
             let progress_value = self.progress.percent.unwrap_or(0.0);
-            ui.add(
+            ui.add_sized(
+                [width, 0.0],
                 egui::ProgressBar::new(progress_value)
                     .show_percentage()
-                    .desired_width(f32::INFINITY),
+                    .desired_width(width),
             );
 
             if let Some(file) = &self.progress.current_file {
