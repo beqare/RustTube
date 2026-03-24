@@ -1,6 +1,6 @@
 use std::{
     io::Read,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
     sync::mpsc::Sender,
     thread,
@@ -28,20 +28,14 @@ pub fn run_command_streaming(command: Command, sender: &Sender<WorkerEvent>) -> 
 pub fn run_command_streaming_with_handle(
     mut command: Command,
     sender: &Sender<WorkerEvent>,
-    child_slot: Option<Arc<Mutex<Option<Child>>>>,
+    child_slot: Option<Arc<Mutex<Option<u32>>>>,
 ) -> Result<(bool, String), String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|error| format!("could not launch process: {error}"))?;
-
-    let mut child = child;
-    if let Some(slot) = &child_slot {
-        let mut child_guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
-        *child_guard = Some(child);
-        child = child_guard.take().ok_or_else(|| "missing spawned child process".to_owned())?;
-    }
+    let child_id = child.id();
 
     let stdout = child
         .stdout
@@ -56,6 +50,11 @@ pub fn run_command_streaming_with_handle(
 
     let stdout_handle = spawn_stream_reader(stdout, sender.clone(), Arc::clone(&combined_output));
     let stderr_handle = spawn_stream_reader(stderr, sender.clone(), Arc::clone(&combined_output));
+
+    if let Some(slot) = &child_slot {
+        let mut child_guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
+        *child_guard = Some(child_id);
+    }
 
     let status = child
         .wait()
@@ -78,13 +77,49 @@ pub fn run_command_streaming_with_handle(
     Ok((status.success(), output))
 }
 
-pub fn cancel_child_process(slot: &Arc<Mutex<Option<Child>>>) -> Result<bool, String> {
-    let mut guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
-    let Some(child) = guard.as_mut() else {
-        return Ok(false);
+pub fn cancel_child_process(slot: &Arc<Mutex<Option<u32>>>) -> Result<bool, String> {
+    let pid = {
+        let guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
+        let Some(pid) = *guard else {
+            return Ok(false);
+        };
+        pid
     };
 
-    child.kill().map_err(|error| format!("failed to stop process: {error}"))?;
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("taskkill");
+        configure_background_command(&mut command);
+        let status = command
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status()
+            .map_err(|error| format!("failed to stop process tree: {error}"))?;
+
+        if !status.success() {
+            return Err(format!("failed to stop process tree for PID {pid}"));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let status = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .map_err(|error| format!("failed to stop process: {error}"))?;
+
+        if !status.success() {
+            return Err(format!("failed to stop process for PID {pid}"));
+        }
+    }
+
+    let mut guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
+    let Some(current_pid) = *guard else {
+        return Ok(false);
+    };
+    if current_pid == pid {
+        *guard = None;
+    }
+
     Ok(true)
 }
 

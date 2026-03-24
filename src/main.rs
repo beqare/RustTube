@@ -10,7 +10,7 @@ mod settings;
 use std::{
     fs,
     path::PathBuf,
-    process::{Child, Command},
+    process::Command,
     sync::{Arc, Mutex},
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -66,7 +66,7 @@ struct RustTubeApp {
     preview: Option<MediaPreview>,
     preview_texture: Option<TextureHandle>,
     progress: DownloadProgress,
-    active_child: Arc<Mutex<Option<Child>>>,
+    active_child: Arc<Mutex<Option<u32>>>,
     last_saved_settings: Option<AppSettings>,
 }
 
