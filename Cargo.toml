@@ -3,6 +3,16 @@ name = "rusttube_gui"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
+authors = ["RustTube Team"]
+description = "Simple Windows GUI for yt-dlp downloads"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/example/rusttube"
+homepage = "https://jonasgrimm.de"
+documentation = "https://github.com/example/rusttube"
+keywords = ["yt-dlp", "downloader", "gui", "windows", "rust"]
+categories = ["gui", "multimedia"]
+rust-version = "1.94"
 
 [dependencies]
 directories = "6.0.0"
