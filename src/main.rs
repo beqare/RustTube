@@ -1,29 +1,31 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_model;
+mod icon;
+mod preview;
+mod process_utils;
+
 use std::{
-    io::Read,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    path::PathBuf,
+    process::Command,
+    sync::Arc,
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
+use app_model::{
+    DownloadMode, FormatEntry, MediaPreview, QualityPreset, ToolPaths, WorkerEvent, audio_quality,
+    find_tool_paths, parse_formats, tool_command_prefix, video_selector,
+};
 use directories::UserDirs;
 use eframe::{
     App, Frame, NativeOptions,
     egui::{self, Color32, RichText, TextureHandle},
 };
-use ico::IconDir;
-use image::GenericImageView;
+use icon::load_app_icon;
+use preview::fetch_media_preview;
+use process_utils::{configure_background_command, run_command_streaming};
 use rfd::FileDialog;
-use serde_json::Value;
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions {
@@ -34,86 +36,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
-        "RustTube",
-        options,
-        Box::new(|_cc| Ok(Box::<RustTubeApp>::default())),
-    )
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum DownloadMode {
-    Video,
-    AudioMp3,
-    Manual,
-}
-
-impl DownloadMode {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Video => "Video",
-            Self::AudioMp3 => "Audio (MP3)",
-            Self::Manual => "Manual yt-dlp format",
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum QualityPreset {
-    Best,
-    P1080,
-    P720,
-    P480,
-    Worst,
-}
-
-impl QualityPreset {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Best => "Best available quality",
-            Self::P1080 => "Up to 1080p",
-            Self::P720 => "Up to 720p",
-            Self::P480 => "Up to 480p",
-            Self::Worst => "Lowest quality",
-        }
-    }
-}
-
-#[derive(Clone)]
-struct FormatEntry {
-    id: String,
-    description: String,
-}
-
-#[derive(Clone)]
-struct ToolPaths {
-    lib_dir: PathBuf,
-    yt_dlp_path: PathBuf,
-}
-
-#[derive(Clone)]
-struct MediaPreview {
-    title: String,
-    uploader: String,
-    duration: Option<String>,
-    webpage_url: String,
-    thumbnail_url: Option<String>,
-    thumbnail_rgba: Option<(Vec<u8>, [usize; 2])>,
-}
-
-enum WorkerEvent {
-    LogChunk(String),
-    PreviewLoaded {
-        url: String,
-        preview: Option<MediaPreview>,
-        error: Option<String>,
-    },
-    FormatsLoaded {
-        entries: Vec<FormatEntry>,
-    },
-    DownloadFinished {
-        success: bool,
-    },
+    eframe::run_native("RustTube", options, Box::new(|_cc| Ok(Box::<RustTubeApp>::default())))
 }
 
 struct RustTubeApp {
@@ -190,7 +113,7 @@ impl App for RustTubeApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.columns(2, |columns| {
                 let ui = &mut columns[0];
-            ui.heading("RustTube");
+                ui.heading("RustTube");
                 ui.label("Paste any URL supported by yt-dlp, choose a format and quality, then start the download.");
                 ui.add_space(10.0);
 
@@ -324,8 +247,8 @@ impl App for RustTubeApp {
                         )
                     });
 
-                let user_scrolled = scroll_output.inner.hovered()
-                    && ui.input(|input| input.raw_scroll_delta.y.abs() > 0.0);
+                let user_scrolled =
+                    scroll_output.inner.hovered() && ui.input(|input| input.raw_scroll_delta.y.abs() > 0.0);
                 if user_scrolled {
                     self.log_auto_scroll = false;
                 }
@@ -556,9 +479,7 @@ impl RustTubeApp {
                 Ok((_success, output)) => WorkerEvent::FormatsLoaded {
                     entries: parse_formats(&output),
                 },
-                Err(_error) => WorkerEvent::FormatsLoaded {
-                    entries: Vec::new(),
-                },
+                Err(_error) => WorkerEvent::FormatsLoaded { entries: Vec::new() },
             };
 
             if let Some(error_log) = error_log {
@@ -630,9 +551,7 @@ impl RustTubeApp {
 
         thread::spawn(move || {
             let mut command = Command::new(&tool_paths.yt_dlp_path);
-            command
-                .args(tool_command_prefix(&tool_paths.lib_dir))
-                .args(&args);
+            command.args(tool_command_prefix(&tool_paths.lib_dir)).args(&args);
             configure_background_command(&mut command);
 
             let result = run_command_streaming(command, &sender);
@@ -643,9 +562,7 @@ impl RustTubeApp {
 
             let event = match result {
                 Ok((success, _output)) => WorkerEvent::DownloadFinished { success },
-                Err(_error) => WorkerEvent::DownloadFinished {
-                    success: false,
-                },
+                Err(_error) => WorkerEvent::DownloadFinished { success: false },
             };
 
             if let Some(error_log) = error_log {
@@ -663,287 +580,4 @@ impl RustTubeApp {
 
         Some(PathBuf::from(trimmed))
     }
-}
-
-fn parse_formats(raw: &str) -> Vec<FormatEntry> {
-    raw.lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty()
-                || trimmed.starts_with('[')
-                || trimmed.starts_with("ID")
-                || trimmed.starts_with('-')
-            {
-                return None;
-            }
-
-            let id = trimmed.split_whitespace().next()?;
-            if !id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-') {
-                return None;
-            }
-
-            Some(FormatEntry {
-                id: id.to_owned(),
-                description: trimmed.to_owned(),
-            })
-        })
-        .collect()
-}
-
-fn video_selector(quality: &QualityPreset) -> &'static str {
-    match quality {
-        QualityPreset::Best => {
-            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best"
-        }
-        QualityPreset::P1080 => {
-            "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-        }
-        QualityPreset::P720 => {
-            "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[height<=720]"
-        }
-        QualityPreset::P480 => {
-            "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/bestvideo[height<=480]+bestaudio/best[height<=480]"
-        }
-        QualityPreset::Worst => "worst[ext=mp4]/worstvideo+worstaudio/worst",
-    }
-}
-
-fn audio_quality(quality: &QualityPreset) -> &'static str {
-    match quality {
-        QualityPreset::Best => "0",
-        QualityPreset::P1080 => "2",
-        QualityPreset::P720 => "4",
-        QualityPreset::P480 => "6",
-        QualityPreset::Worst => "9",
-    }
-}
-
-fn fetch_media_preview(tool_paths: &ToolPaths, url: &str) -> Result<MediaPreview, String> {
-    let mut command = Command::new(&tool_paths.yt_dlp_path);
-    command.args(tool_command_prefix(&tool_paths.lib_dir)).args([
-        "--dump-single-json".to_owned(),
-        "--skip-download".to_owned(),
-        "--no-playlist".to_owned(),
-        url.to_owned(),
-    ]);
-    configure_background_command(&mut command);
-
-    let output = command
-        .output()
-        .map_err(|error| format!("Could not load preview: {error}"))?;
-
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    if text.trim().is_empty() && !output.stderr.is_empty() {
-        text = String::from_utf8_lossy(&output.stderr).to_string();
-    }
-
-    let json: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("Could not parse preview data: {error}"))?;
-
-    let title = json
-        .get("track")
-        .and_then(Value::as_str)
-        .or_else(|| json.get("title").and_then(Value::as_str))
-        .unwrap_or("Unknown title")
-        .to_owned();
-
-    let uploader = json
-        .get("artist")
-        .and_then(Value::as_str)
-        .or_else(|| json.get("uploader").and_then(Value::as_str))
-        .or_else(|| json.get("channel").and_then(Value::as_str))
-        .unwrap_or("Unknown creator")
-        .to_owned();
-
-    let duration = json
-        .get("duration")
-        .and_then(Value::as_f64)
-        .map(|seconds| format_duration(seconds as u64));
-
-    let webpage_url = json
-        .get("webpage_url")
-        .and_then(Value::as_str)
-        .unwrap_or(url)
-        .to_owned();
-
-    let thumbnail_url = json
-        .get("thumbnail")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-
-    let thumbnail_rgba = thumbnail_url
-        .as_deref()
-        .and_then(|thumb_url| download_thumbnail(thumb_url).ok());
-
-    Ok(MediaPreview {
-        title,
-        uploader,
-        duration,
-        webpage_url,
-        thumbnail_url,
-        thumbnail_rgba,
-    })
-}
-
-fn download_thumbnail(url: &str) -> Result<(Vec<u8>, [usize; 2]), String> {
-    let response = reqwest::blocking::get(url)
-        .and_then(|response| response.error_for_status())
-        .map_err(|error| format!("Could not download thumbnail: {error}"))?;
-
-    let bytes = response
-        .bytes()
-        .map_err(|error| format!("Could not read thumbnail bytes: {error}"))?;
-
-    let image = image::load_from_memory(&bytes)
-        .map_err(|error| format!("Could not decode thumbnail: {error}"))?;
-    let rgba = image.to_rgba8();
-    let (width, height) = image.dimensions();
-
-    Ok((rgba.into_raw(), [width as usize, height as usize]))
-}
-
-fn format_duration(total_seconds: u64) -> String {
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
-
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes:02}:{seconds:02}")
-    }
-}
-
-fn tool_command_prefix(lib_dir: &Path) -> Vec<String> {
-    let mut args = vec!["--ffmpeg-location".to_owned(), lib_dir.display().to_string()];
-
-    let deno_path = find_deno_in_lib(lib_dir);
-    if let Some(deno_path) = deno_path {
-        args.push("--js-runtimes".to_owned());
-        args.push(format!("deno:{}", deno_path.display()));
-    }
-
-    args
-}
-
-fn find_tool_paths() -> Option<ToolPaths> {
-    let mut candidates = Vec::new();
-
-    if let Ok(current_dir) = std::env::current_dir() {
-        candidates.push(current_dir.join("lib"));
-    }
-
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            candidates.push(exe_dir.join("lib"));
-            candidates.push(exe_dir.join("..").join("lib"));
-            candidates.push(exe_dir.join("..").join("..").join("lib"));
-        }
-    }
-
-    candidates.into_iter().find_map(|lib_dir| {
-        let yt_dlp_path = lib_dir.join("yt-dlp.exe");
-        yt_dlp_path.is_file().then_some(ToolPaths { lib_dir, yt_dlp_path })
-    })
-}
-
-fn find_deno_in_lib(lib_dir: &Path) -> Option<PathBuf> {
-    let candidates = [
-        lib_dir.join("deno.exe"),
-        lib_dir.join("bin").join("deno.exe"),
-        lib_dir.join("deno").join("bin").join("deno.exe"),
-    ];
-
-    candidates.into_iter().find(|path| path.is_file())
-}
-
-fn load_app_icon() -> egui::IconData {
-    let icon_bytes = include_bytes!("../assets/icon.ico");
-    let mut cursor = std::io::Cursor::new(icon_bytes.as_slice());
-    let icon_dir = IconDir::read(&mut cursor).expect("failed to read assets/icon.ico");
-
-    let best_entry = icon_dir
-        .entries()
-        .iter()
-        .max_by_key(|entry| entry.width() * entry.height())
-        .expect("assets/icon.ico does not contain any icon entries");
-
-    let image = best_entry
-        .decode()
-        .expect("failed to decode icon image from assets/icon.ico");
-
-    egui::IconData {
-        rgba: image.rgba_data().to_vec(),
-        width: image.width(),
-        height: image.height(),
-    }
-}
-
-fn configure_background_command(command: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-}
-
-fn run_command_streaming(mut command: Command, sender: &Sender<WorkerEvent>) -> Result<(bool, String), String> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("could not launch process: {error}"))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "could not capture stdout".to_owned())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "could not capture stderr".to_owned())?;
-
-    let combined_output = Arc::new(Mutex::new(String::new()));
-
-    let stdout_handle = spawn_stream_reader(stdout, sender.clone(), Arc::clone(&combined_output));
-    let stderr_handle = spawn_stream_reader(stderr, sender.clone(), Arc::clone(&combined_output));
-
-    let status = child
-        .wait()
-        .map_err(|error| format!("failed while waiting for process: {error}"))?;
-
-    let _ = stdout_handle.join();
-    let _ = stderr_handle.join();
-
-    let output = match Arc::try_unwrap(combined_output) {
-        Ok(buffer) => buffer.into_inner().unwrap_or_default(),
-        Err(buffer) => buffer.lock().map(|text| text.clone()).unwrap_or_default(),
-    };
-
-    Ok((status.success(), output))
-}
-
-fn spawn_stream_reader<R: Read + Send + 'static>(
-    mut reader: R,
-    sender: Sender<WorkerEvent>,
-    output: Arc<Mutex<String>>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let mut buffer = [0_u8; 2048];
-
-        loop {
-            let bytes_read = match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(count) => count,
-                Err(_) => break,
-            };
-
-            let chunk = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
-
-            if let Ok(mut text) = output.lock() {
-                text.push_str(&chunk);
-            }
-
-            let _ = sender.send(WorkerEvent::LogChunk(chunk));
-        }
-    })
 }
