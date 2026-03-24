@@ -21,6 +21,11 @@ path = "src/main.rs"
 [dependencies]
 directories = "6.0.0"
 eframe = { version = "0.33.0", default-features = true }
+ico = "0.4.0"
+
+[build-dependencies]
+ico = "0.4.0"
+winresource = "0.1.19"
 
 [profile.release]
 opt-level = "z"

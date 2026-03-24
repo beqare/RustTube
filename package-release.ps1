@@ -7,6 +7,9 @@ $libDir = Join-Path $releaseDir "lib"
 $exeName = "RustTube.exe"
 
 cargo build --release
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
 
 if (Test-Path $distDir) {
     Remove-Item -LiteralPath $distDir -Recurse -Force

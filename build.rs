@@ -5,14 +5,17 @@ use std::{
 
 fn main() {
     println!("cargo:rerun-if-changed=lib");
+    println!("cargo:rerun-if-changed=assets/icon.ico");
 
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR"));
+    configure_windows_icon(&manifest_dir);
+
     let source_lib_dir = manifest_dir.join("lib");
     if !source_lib_dir.is_dir() {
         return;
     }
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
     let profile = env::var("PROFILE").expect("missing PROFILE");
 
     if let Some(profile_dir) = find_profile_dir(&out_dir, &profile) {
@@ -23,6 +26,22 @@ fn main() {
                 source_lib_dir.display(),
                 target_lib_dir.display()
             );
+        }
+    }
+}
+
+fn configure_windows_icon(manifest_dir: &Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let icon_path = manifest_dir.join("assets").join("icon.ico");
+        if !icon_path.is_file() {
+            panic!("missing Windows icon file '{}'", icon_path.display());
+        }
+
+        let mut resource = winresource::WindowsResource::new();
+        resource.set_icon(icon_path.to_string_lossy().as_ref());
+        if let Err(error) = resource.compile() {
+            panic!("failed to compile Windows resources: {error}");
         }
     }
 }

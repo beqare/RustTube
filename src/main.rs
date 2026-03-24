@@ -3,6 +3,7 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
@@ -12,12 +13,14 @@ use eframe::{
     App, Frame, NativeOptions,
     egui::{self, Color32, RichText},
 };
+use ico::IconDir;
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([860.0, 620.0])
-            .with_min_inner_size([720.0, 520.0]),
+            .with_min_inner_size([720.0, 520.0])
+            .with_icon(Arc::new(load_app_icon())),
         ..Default::default()
     };
 
@@ -491,4 +494,26 @@ fn find_deno_in_lib(lib_dir: &Path) -> Option<PathBuf> {
     ];
 
     candidates.into_iter().find(|path| path.is_file())
+}
+
+fn load_app_icon() -> egui::IconData {
+    let icon_bytes = include_bytes!("../assets/icon.ico");
+    let mut cursor = std::io::Cursor::new(icon_bytes.as_slice());
+    let icon_dir = IconDir::read(&mut cursor).expect("failed to read assets/icon.ico");
+
+    let best_entry = icon_dir
+        .entries()
+        .iter()
+        .max_by_key(|entry| entry.width() * entry.height())
+        .expect("assets/icon.ico does not contain any icon entries");
+
+    let image = best_entry
+        .decode()
+        .expect("failed to decode icon image from assets/icon.ico");
+
+    egui::IconData {
+        rgba: image.rgba_data().to_vec(),
+        width: image.width(),
+        height: image.height(),
+    }
 }
