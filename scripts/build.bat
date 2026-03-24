@@ -1,8 +1,8 @@
 @echo off
 setlocal
 
-cd /d "%~dp0"
-powershell -ExecutionPolicy Bypass -File ".\package-release.ps1"
+cd /d "%~dp0\.."
+powershell -ExecutionPolicy Bypass -File ".\scripts\package-release.ps1"
 
 if errorlevel 1 (
     echo.

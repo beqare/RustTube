@@ -3,8 +3,8 @@
 #define MyAppPublisher "Jonas Grimm"
 #define MyAppURL "https://github.com/beqare/RustTube"
 #define MyAppExeName "RustTube.exe"
-#define MyAppDistDir "dist\\RustTube"
-#define MyAppIconFile "assets\\icon.ico"
+#define MyAppDistDir "..\\dist\\RustTube"
+#define MyAppIconFile "..\\assets\\icon.ico"
 
 [Setup]
 AppId={{9B1C5BB1-1A8F-4D9D-BB7D-B74A5601E9A1}
@@ -19,7 +19,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=
 PrivilegesRequired=admin
-OutputDir=dist\installer
+OutputDir=..\dist\installer
 OutputBaseFilename=RustTube-Setup
 SetupIconFile={#MyAppIconFile}
 UninstallDisplayIcon={app}\{#MyAppExeName}

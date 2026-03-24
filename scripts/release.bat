@@ -1,9 +1,9 @@
 @echo off
 setlocal
 
-cd /d "%~dp0"
+cd /d "%~dp0\.."
 
-call ".\build.bat"
+call ".\scripts\build.bat"
 if errorlevel 1 (
     echo.
     echo Release build stopped because build.bat failed.
@@ -29,7 +29,7 @@ if not defined ISCC (
 
 echo.
 echo Running Inno Setup compiler...
-"%ISCC%" ".\setup.iss"
+"%ISCC%" ".\scripts\setup.iss"
 if errorlevel 1 (
     echo.
     echo Installer build failed.

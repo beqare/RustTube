@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $releaseDir = Join-Path $root "target\release"
 $distDir = Join-Path $root "dist\RustTube"
 $libDir = Join-Path $releaseDir "lib"
