@@ -29,7 +29,10 @@ use image::{ImageBuffer, Rgba};
 use icon::load_app_icon;
 use progress::{DownloadProgress, ProgressPhase};
 use preview::fetch_media_preview;
-use process_utils::{cancel_child_process, configure_background_command, run_command_streaming, run_command_streaming_with_handle};
+use process_utils::{
+    ActiveProcess, cancel_child_process, clear_active_process, configure_background_command,
+    run_command_streaming, run_command_streaming_with_handle,
+};
 use rfd::FileDialog;
 use settings::{AppSettings, load_settings, save_settings};
 
@@ -67,7 +70,7 @@ struct RustTubeApp {
     preview: Option<MediaPreview>,
     preview_texture: Option<TextureHandle>,
     progress: DownloadProgress,
-    active_child: Arc<Mutex<Option<u32>>>,
+    active_child: Arc<Mutex<Option<ActiveProcess>>>,
     last_saved_settings: Option<AppSettings>,
 }
 
@@ -775,6 +778,12 @@ impl RustTubeApp {
                 ui.label(format!("Current file: {file}"));
             }
         });
+    }
+}
+
+impl Drop for RustTubeApp {
+    fn drop(&mut self) {
+        clear_active_process(&self.active_child);
     }
 }
 

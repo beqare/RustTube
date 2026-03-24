@@ -1,6 +1,6 @@
 use std::{
     io::Read,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     sync::mpsc::Sender,
     thread,
@@ -9,10 +9,46 @@ use std::{
 use crate::app_model::WorkerEvent;
 
 #[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+use std::{
+    mem::{size_of, zeroed},
+    os::windows::{io::AsRawHandle, process::CommandExt},
+};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    },
+};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[derive(Debug)]
+pub struct ActiveProcess {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    pub pid: u32,
+    #[cfg(target_os = "windows")]
+    job_handle: HANDLE,
+}
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for ActiveProcess {}
+
+#[cfg(target_os = "windows")]
+unsafe impl Sync for ActiveProcess {}
+
+#[cfg(target_os = "windows")]
+impl Drop for ActiveProcess {
+    fn drop(&mut self) {
+        if !self.job_handle.is_null() {
+            unsafe {
+                CloseHandle(self.job_handle);
+            }
+        }
+    }
+}
 
 pub fn configure_background_command(command: &mut Command) {
     #[cfg(target_os = "windows")]
@@ -28,14 +64,13 @@ pub fn run_command_streaming(command: Command, sender: &Sender<WorkerEvent>) -> 
 pub fn run_command_streaming_with_handle(
     mut command: Command,
     sender: &Sender<WorkerEvent>,
-    child_slot: Option<Arc<Mutex<Option<u32>>>>,
+    child_slot: Option<Arc<Mutex<Option<ActiveProcess>>>>,
 ) -> Result<(bool, String), String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = command
         .spawn()
         .map_err(|error| format!("could not launch process: {error}"))?;
-    let child_id = child.id();
 
     let stdout = child
         .stdout
@@ -53,7 +88,7 @@ pub fn run_command_streaming_with_handle(
 
     if let Some(slot) = &child_slot {
         let mut child_guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
-        *child_guard = Some(child_id);
+        *child_guard = Some(register_active_process(&child)?);
     }
 
     let status = child
@@ -71,56 +106,83 @@ pub fn run_command_streaming_with_handle(
     if let Some(slot) = &child_slot
         && let Ok(mut child_guard) = slot.lock()
     {
-        *child_guard = None;
+        let _ = child_guard.take();
     }
 
     Ok((status.success(), output))
 }
 
-pub fn cancel_child_process(slot: &Arc<Mutex<Option<u32>>>) -> Result<bool, String> {
-    let pid = {
-        let guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
-        let Some(pid) = *guard else {
-            return Ok(false);
-        };
-        pid
+pub fn cancel_child_process(slot: &Arc<Mutex<Option<ActiveProcess>>>) -> Result<bool, String> {
+    let mut guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
+    let Some(active_process) = guard.take() else {
+        return Ok(false);
     };
-
-    #[cfg(target_os = "windows")]
-    {
-        let mut command = Command::new("taskkill");
-        configure_background_command(&mut command);
-        let status = command
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status()
-            .map_err(|error| format!("failed to stop process tree: {error}"))?;
-
-        if !status.success() {
-            return Err(format!("failed to stop process tree for PID {pid}"));
-        }
-    }
 
     #[cfg(not(target_os = "windows"))]
     {
         let status = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
+            .args(["-TERM", &active_process.pid.to_string()])
             .status()
             .map_err(|error| format!("failed to stop process: {error}"))?;
 
         if !status.success() {
-            return Err(format!("failed to stop process for PID {pid}"));
+            return Err(format!("failed to stop process for PID {}", active_process.pid));
         }
     }
 
-    let mut guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
-    let Some(current_pid) = *guard else {
-        return Ok(false);
-    };
-    if current_pid == pid {
-        *guard = None;
+    drop(active_process);
+    Ok(true)
+}
+
+pub fn clear_active_process(slot: &Arc<Mutex<Option<ActiveProcess>>>) {
+    if let Ok(mut guard) = slot.lock() {
+        let _ = guard.take();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn register_active_process(child: &Child) -> Result<ActiveProcess, String> {
+    let job_handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job_handle.is_null() {
+        return Err("failed to create Windows job object".to_owned());
     }
 
-    Ok(true)
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+    let ok = unsafe {
+        SetInformationJobObject(
+            job_handle,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const _,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if ok == 0 {
+        unsafe {
+            CloseHandle(job_handle);
+        }
+        return Err("failed to configure Windows job object".to_owned());
+    }
+
+    let process_handle = child.as_raw_handle() as HANDLE;
+    let ok = unsafe { AssignProcessToJobObject(job_handle, process_handle) };
+    if ok == 0 {
+        unsafe {
+            CloseHandle(job_handle);
+        }
+        return Err("failed to attach process to Windows job object".to_owned());
+    }
+
+    Ok(ActiveProcess {
+        pid: child.id(),
+        job_handle,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn register_active_process(child: &Child) -> Result<ActiveProcess, String> {
+    Ok(ActiveProcess { pid: child.id() })
 }
 
 fn spawn_stream_reader<R: Read + Send + 'static>(
