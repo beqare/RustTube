@@ -42,6 +42,7 @@ use runtime_tools::{
 use settings::{AppSettings, load_settings, save_settings, settings_dir_path};
 
 fn main() -> eframe::Result<()> {
+    let window_title = format!("RustTube {}", env!("CARGO_PKG_VERSION"));
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1040.0, 760.0])
@@ -50,7 +51,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native("RustTube", options, Box::new(|_cc| Ok(Box::<RustTubeApp>::default())))
+    eframe::run_native(&window_title, options, Box::new(|_cc| Ok(Box::<RustTubeApp>::default())))
 }
 
 struct RustTubeApp {

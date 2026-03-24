@@ -22,6 +22,9 @@ echo Invalid selection. Please run again and choose 1 or 2.
 exit /b 1
 
 :build_only
+call :bump_version
+if errorlevel 1 exit /b 1
+
 powershell -ExecutionPolicy Bypass -File ".\scripts\package-release.ps1"
 if errorlevel 1 (
     echo.
@@ -34,7 +37,10 @@ echo Build finished successfully.
 exit /b 0
 
 :build_release
-call "%~f0" 1
+call :bump_version
+if errorlevel 1 exit /b 1
+
+powershell -ExecutionPolicy Bypass -File ".\scripts\package-release.ps1"
 if errorlevel 1 (
     echo.
     echo Release build stopped because the app build failed.
@@ -58,9 +64,12 @@ if not defined ISCC (
     exit /b 1
 )
 
+call :read_version
+if errorlevel 1 exit /b 1
+
 echo.
 echo Running Inno Setup compiler...
-"%ISCC%" ".\scripts\setup.iss"
+"%ISCC%" "/DMyAppVersion=%APP_VERSION%" ".\scripts\setup.iss"
 if errorlevel 1 (
     echo.
     echo Installer build failed.
@@ -70,4 +79,42 @@ if errorlevel 1 (
 echo.
 echo Release finished successfully.
 echo Installer output should be in dist\installer
+exit /b 0
+
+:bump_version
+echo.
+echo Bumping Cargo.toml version...
+powershell -ExecutionPolicy Bypass -Command ^
+  "$path = 'Cargo.toml';" ^
+  "$content = Get-Content -LiteralPath $path -Raw;" ^
+  "$match = [regex]::Match($content, '(?m)^version\s*=\s*\"(\d+)\.(\d+)\.(\d+)\"');" ^
+  "if (-not $match.Success) { throw 'Could not find semver version in Cargo.toml'; }" ^
+  "$major = [int]$match.Groups[1].Value;" ^
+  "$minor = [int]$match.Groups[2].Value;" ^
+  "$patch = [int]$match.Groups[3].Value + 1;" ^
+  "$oldVersion = $match.Groups[0].Value;" ^
+  "$newVersion = \"$major.$minor.$patch\";" ^
+  "$updated = [regex]::Replace($content, '(?m)^version\s*=\s*\"(\d+)\.(\d+)\.(\d+)\"', ('version = \"' + $newVersion + '\"'), 1);" ^
+  "Set-Content -LiteralPath $path -Value $updated -Encoding UTF8;" ^
+  "Write-Host ('New version: ' + $newVersion)"
+if errorlevel 1 (
+    echo.
+    echo Failed to bump Cargo.toml version.
+    exit /b 1
+)
+exit /b 0
+
+:read_version
+set "APP_VERSION="
+for /f "usebackq tokens=2 delims== " %%V in (`findstr /R /C:"^version *= *\".*\"" Cargo.toml`) do (
+    set "APP_VERSION=%%V"
+)
+
+if not defined APP_VERSION (
+    echo.
+    echo Could not read version from Cargo.toml.
+    exit /b 1
+)
+
+set "APP_VERSION=%APP_VERSION:"=%"
 exit /b 0

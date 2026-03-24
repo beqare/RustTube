@@ -1,7 +1,10 @@
 #define MyAppName "RustTube"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.0"
+#endif
 #define MyAppPublisher "Jonas Grimm"
 #define MyAppURL "https://github.com/beqare/RustTube"
+#define MySponsorURL "https://github.com/sponsors/beqare?frequency=one-time"
 #define MyAppExeName "RustTube.exe"
 #define MyAppDistDir "..\\dist\\RustTube"
 #define MyAppIconFile "..\\assets\\icon.ico"
@@ -17,6 +20,7 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={userappdata}\JonasGrimm\RustTube
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
+DisableDirPage=yes
 LicenseFile=
 PrivilegesRequired=lowest
 OutputDir=..\dist\installer
@@ -28,6 +32,9 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+CloseApplications=yes
+CloseApplicationsFilter={#MyAppExeName}
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -47,3 +54,5 @@ Type: filesandordirs; Name: "{app}"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{#MyAppURL}"; Description: "Open GitHub page"; Flags: postinstall shellexec skipifsilent unchecked
+Filename: "{#MySponsorURL}"; Description: "Open Sponsor page"; Flags: postinstall shellexec skipifsilent unchecked
