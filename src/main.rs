@@ -517,11 +517,19 @@ fn parse_formats(raw: &str) -> Vec<FormatEntry> {
 
 fn video_selector(quality: &QualityPreset) -> &'static str {
     match quality {
-        QualityPreset::Best => "bv*+ba/b",
-        QualityPreset::P1080 => "bv*[height<=1080]+ba/b[height<=1080]",
-        QualityPreset::P720 => "bv*[height<=720]+ba/b[height<=720]",
-        QualityPreset::P480 => "bv*[height<=480]+ba/b[height<=480]",
-        QualityPreset::Worst => "wv*+wa/w",
+        QualityPreset::Best => {
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best"
+        }
+        QualityPreset::P1080 => {
+            "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+        }
+        QualityPreset::P720 => {
+            "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[height<=720]"
+        }
+        QualityPreset::P480 => {
+            "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/bestvideo[height<=480]+bestaudio/best[height<=480]"
+        }
+        QualityPreset::Worst => "worst[ext=mp4]/worstvideo+worstaudio/worst",
     }
 }
 
