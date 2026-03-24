@@ -14,6 +14,10 @@ keywords = ["yt-dlp", "downloader", "gui", "windows", "rust"]
 categories = ["gui", "multimedia"]
 rust-version = "1.94"
 
+[[bin]]
+name = "RustTube"
+path = "src/main.rs"
+
 [dependencies]
 directories = "6.0.0"
 eframe = { version = "0.33.0", default-features = true }
