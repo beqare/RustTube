@@ -50,6 +50,53 @@ pub struct ToolPaths {
     pub yt_dlp_path: PathBuf,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeTool {
+    YtDlp,
+    Ffmpeg,
+    Ffprobe,
+    Deno,
+}
+
+impl RuntimeTool {
+    pub const ALL: [Self; 4] = [Self::YtDlp, Self::Ffmpeg, Self::Ffprobe, Self::Deno];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::YtDlp => "yt-dlp",
+            Self::Ffmpeg => "ffmpeg",
+            Self::Ffprobe => "ffprobe",
+            Self::Deno => "deno",
+        }
+    }
+
+    pub fn file_name(&self) -> &'static str {
+        match self {
+            Self::YtDlp => "yt-dlp.exe",
+            Self::Ffmpeg => "ffmpeg.exe",
+            Self::Ffprobe => "ffprobe.exe",
+            Self::Deno => "deno.exe",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ToolPackage {
+    YtDlp,
+    FfmpegBundle,
+    Deno,
+}
+
+impl ToolPackage {
+    pub fn tools(&self) -> &'static [RuntimeTool] {
+        match self {
+            Self::YtDlp => &[RuntimeTool::YtDlp],
+            Self::FfmpegBundle => &[RuntimeTool::Ffmpeg, RuntimeTool::Ffprobe],
+            Self::Deno => &[RuntimeTool::Deno],
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MediaPreview {
     pub title: String,
@@ -62,8 +109,14 @@ pub struct MediaPreview {
 
 pub enum WorkerEvent {
     LogChunk(String),
-    ToolsReady {
-        result: Result<ToolPaths, String>,
+    ToolDownloadProgress {
+        package: ToolPackage,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+    },
+    ToolDownloadFinished {
+        package: ToolPackage,
+        result: Result<(), String>,
     },
     PreviewLoaded {
         url: String,

@@ -9,6 +9,7 @@ mod runtime_tools;
 mod settings;
 
 use std::{
+    collections::HashMap,
     fs,
     path::PathBuf,
     process::Command,
@@ -18,8 +19,8 @@ use std::{
 };
 
 use app_model::{
-    DownloadMode, FormatEntry, MediaPreview, QualityPreset, ToolPaths, WorkerEvent, audio_quality,
-    parse_formats, tool_command_prefix, video_selector,
+    DownloadMode, FormatEntry, MediaPreview, QualityPreset, RuntimeTool, ToolPackage, ToolPaths,
+    WorkerEvent, audio_quality, parse_formats, tool_command_prefix, video_selector,
 };
 use directories::UserDirs;
 use eframe::{
@@ -35,8 +36,10 @@ use process_utils::{
     run_command_streaming, run_command_streaming_with_handle,
 };
 use rfd::FileDialog;
-use runtime_tools::{ensure_runtime_tools, missing_tools, resolve_lib_dir, tool_paths_if_ready};
-use settings::{AppSettings, load_settings, save_settings};
+use runtime_tools::{
+    download_package, missing_packages, package_for_tool, resolve_lib_dir, tool_installed, tool_paths_if_ready,
+};
+use settings::{AppSettings, load_settings, save_settings, settings_dir_path};
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions {
@@ -62,9 +65,10 @@ struct RustTubeApp {
     download_path: String,
     lib_dir: PathBuf,
     tool_paths: Option<ToolPaths>,
+    tool_states: HashMap<RuntimeTool, ToolUiState>,
     worker_tx: Sender<WorkerEvent>,
     worker_rx: Receiver<WorkerEvent>,
-    tool_installing: bool,
+    active_tool_package: Option<ToolPackage>,
     loading_formats: bool,
     downloading: bool,
     cancel_requested: bool,
@@ -78,12 +82,24 @@ struct RustTubeApp {
     last_saved_settings: Option<AppSettings>,
 }
 
+#[derive(Clone, Default)]
+struct ToolUiState {
+    downloading: bool,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    error: Option<String>,
+}
+
 impl Default for RustTubeApp {
     fn default() -> Self {
         let (worker_tx, worker_rx) = mpsc::channel();
         let downloads_dir = UserDirs::new().map(|dirs| dirs.download_dir().unwrap_or(dirs.home_dir()).to_path_buf());
         let lib_dir = resolve_lib_dir();
         let tool_paths = tool_paths_if_ready(&lib_dir);
+        let tool_states = RuntimeTool::ALL
+            .into_iter()
+            .map(|tool| (tool, ToolUiState::default()))
+            .collect();
         let mut download_path = downloads_dir
             .as_ref()
             .map(|path| path.display().to_string())
@@ -102,19 +118,22 @@ impl Default for RustTubeApp {
             last_url = saved_last_url;
         }
 
-        let missing = missing_tools(&lib_dir);
-        let should_install_tools = !missing.is_empty();
+        let missing = RuntimeTool::ALL
+            .into_iter()
+            .filter(|tool| !tool_installed(&lib_dir, *tool))
+            .map(|tool| tool.label())
+            .collect::<Vec<_>>();
 
-        let status = match (&tool_paths, &downloads_dir, should_install_tools) {
-            (Some(_paths), Some(_downloads), false) => String::new(),
+        let status = match (&tool_paths, &downloads_dir, missing.is_empty()) {
+            (Some(_paths), Some(_downloads), true) => String::new(),
             (_, None, _) => "Error: Could not determine the Windows Downloads folder.".to_owned(),
-            _ => format!("Downloading required tools: {}", missing.join(", ")),
+            _ => format!("Install required tools from the sidebar: {}", missing.join(", ")),
         };
 
         let initial_settings =
             AppSettings::from_runtime(download_path.clone(), &mode, &quality, last_url.clone());
 
-        let mut app = Self {
+        Self {
             url: last_url,
             mode,
             quality,
@@ -126,9 +145,10 @@ impl Default for RustTubeApp {
             download_path,
             lib_dir,
             tool_paths,
+            tool_states,
             worker_tx,
             worker_rx,
-            tool_installing: false,
+            active_tool_package: None,
             loading_formats: false,
             downloading: false,
             cancel_requested: false,
@@ -140,13 +160,7 @@ impl Default for RustTubeApp {
             progress: DownloadProgress::default(),
             active_child: Arc::new(Mutex::new(None)),
             last_saved_settings: Some(initial_settings),
-        };
-
-        if should_install_tools {
-            app.start_runtime_tool_install();
         }
-
-        app
     }
 }
 
@@ -164,6 +178,10 @@ impl App for RustTubeApp {
                 ui.heading("Preview");
                 ui.add_space(10.0);
                 self.render_preview(ui);
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+                self.render_tools_sidebar(ui);
                 ui.add_space(12.0);
                 ui.separator();
                 ui.add_space(8.0);
@@ -255,14 +273,6 @@ impl App for RustTubeApp {
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {
-                let can_install_tools = !self.tool_installing && self.tool_paths.is_none();
-                if ui
-                    .add_enabled(can_install_tools, egui::Button::new("Install tools"))
-                    .clicked()
-                {
-                    self.start_runtime_tool_install();
-                }
-
                 let can_fetch = !self.loading_formats && self.can_run_commands();
                 if ui.add_enabled(can_fetch, egui::Button::new("Load formats")).clicked() {
                     self.load_formats();
@@ -275,12 +285,12 @@ impl App for RustTubeApp {
 
                 let can_cancel = self.downloading;
                 if ui.add_enabled(can_cancel, egui::Button::new("Cancel")).clicked() {
-                        match cancel_child_process(&self.active_child) {
-                            Ok(true) => {
-                                self.cancel_requested = true;
-                                self.status = "Cancel requested...".to_owned();
-                                self.progress.phase = ProgressPhase::Canceled;
-                            }
+                    match cancel_child_process(&self.active_child) {
+                        Ok(true) => {
+                            self.cancel_requested = true;
+                            self.status = "Cancel requested...".to_owned();
+                            self.progress.phase = ProgressPhase::Canceled;
+                        }
                         Ok(false) => {
                             self.status = "No active download to cancel.".to_owned();
                         }
@@ -378,7 +388,7 @@ impl App for RustTubeApp {
             }
         });
 
-        if self.loading_formats || self.downloading || self.preview_loading {
+        if self.loading_formats || self.downloading || self.preview_loading || self.active_tool_package.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
     }
@@ -430,7 +440,10 @@ impl RustTubeApp {
     }
 
     fn can_run_commands(&self) -> bool {
-        !self.tool_installing && self.tool_paths.is_some() && !self.url.trim().is_empty() && self.target_download_dir().is_some()
+        self.active_tool_package.is_none()
+            && self.tool_paths.is_some()
+            && !self.url.trim().is_empty()
+            && self.target_download_dir().is_some()
     }
 
     fn can_start_download(&self) -> bool {
@@ -447,6 +460,44 @@ impl RustTubeApp {
                 WorkerEvent::LogChunk(chunk) => {
                     self.logs.push_str(&chunk);
                     self.progress.update_from_chunk(&chunk);
+                }
+                WorkerEvent::ToolDownloadProgress {
+                    package,
+                    downloaded_bytes,
+                    total_bytes,
+                } => {
+                    self.active_tool_package = Some(package);
+                    for tool in package.tools() {
+                        if let Some(state) = self.tool_states.get_mut(tool) {
+                            state.downloading = true;
+                            state.downloaded_bytes = downloaded_bytes;
+                            state.total_bytes = total_bytes;
+                            state.error = None;
+                        }
+                    }
+                }
+                WorkerEvent::ToolDownloadFinished { package, result } => {
+                    self.active_tool_package = None;
+                    match result {
+                        Ok(()) => {
+                            for tool in package.tools() {
+                                if let Some(state) = self.tool_states.get_mut(tool) {
+                                    *state = ToolUiState::default();
+                                }
+                            }
+                            self.tool_paths = tool_paths_if_ready(&self.lib_dir);
+                            self.status = format!("{} ready.", package_label(package));
+                        }
+                        Err(error) => {
+                            for tool in package.tools() {
+                                if let Some(state) = self.tool_states.get_mut(tool) {
+                                    state.downloading = false;
+                                    state.error = Some(error.clone());
+                                }
+                            }
+                            self.status = error;
+                        }
+                    }
                 }
                 WorkerEvent::PreviewLoaded { url, preview, error } => {
                     if url != self.url.trim() {
@@ -514,43 +565,8 @@ impl RustTubeApp {
                         "Download failed. See the log for details.".to_owned()
                     };
                 }
-                WorkerEvent::ToolsReady { result } => {
-                    self.tool_installing = false;
-                    match result {
-                        Ok(tool_paths) => {
-                            self.tool_paths = Some(tool_paths);
-                            self.status.clear();
-                        }
-                        Err(error) => {
-                            self.tool_paths = None;
-                            self.status = error;
-                        }
-                    }
-                }
             }
         }
-    }
-
-    fn start_runtime_tool_install(&mut self) {
-        if self.tool_installing {
-            return;
-        }
-
-        self.tool_installing = true;
-        self.logs.clear();
-        self.log_auto_scroll = true;
-        self.status = format!(
-            "Downloading required tools: {}",
-            missing_tools(&self.lib_dir).join(", ")
-        );
-
-        let sender = self.worker_tx.clone();
-        let lib_dir = self.lib_dir.clone();
-
-        thread::spawn(move || {
-            let result = ensure_runtime_tools(&sender, &lib_dir);
-            let _ = sender.send(WorkerEvent::ToolsReady { result });
-        });
     }
 
     fn render_preview(&mut self, ui: &mut egui::Ui) {
@@ -646,14 +662,189 @@ impl RustTubeApp {
         });
     }
 
+    fn render_tools_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Tools").strong());
+        ui.add_space(4.0);
+        ui.small(format!("Storage: {}", self.lib_dir.display()));
+        ui.add_space(8.0);
+
+        let missing_count = missing_packages(&self.lib_dir).len();
+        if missing_count > 0 {
+            let can_download_all = self.active_tool_package.is_none();
+            if ui
+                .add_enabled(can_download_all, egui::Button::new("Download All"))
+                .clicked()
+            {
+                self.start_missing_tool_downloads();
+            }
+
+            ui.add_space(8.0);
+        }
+
+        for tool in RuntimeTool::ALL {
+            let installed = tool_installed(&self.lib_dir, tool);
+            let package = package_for_tool(tool);
+            let active_package = self.active_tool_package;
+            let is_downloading = active_package == Some(package);
+            let button_enabled = !installed && active_package.is_none();
+            let status_text = self.tool_status_text(tool, installed, is_downloading);
+
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tool.label()).strong());
+                    ui.label(RichText::new(status_text).small().color(Color32::GRAY));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !installed
+                            && ui
+                                .add_enabled(
+                                    button_enabled,
+                                    egui::Button::new(if is_downloading {
+                                        "Downloading..."
+                                    } else {
+                                        "Download"
+                                    }),
+                                )
+                                .clicked()
+                        {
+                            self.start_tool_download(package);
+                        }
+                    });
+                });
+
+                if is_downloading
+                    && let Some(state) = self.tool_states.get(&tool)
+                    && let Some(total) = state.total_bytes
+                    && total > 0
+                {
+                    let progress = (state.downloaded_bytes as f32 / total as f32).clamp(0.0, 1.0);
+                    ui.add(
+                        egui::ProgressBar::new(progress)
+                            .show_percentage()
+                            .desired_width(ui.available_width()),
+                    );
+                }
+            });
+
+            ui.add_space(4.0);
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label(RichText::new("Folders").strong());
+        ui.add_space(6.0);
+
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Tools installation folder").clicked() {
+                if let Err(error) = open_in_file_explorer(&self.lib_dir) {
+                    self.status = error;
+                }
+            }
+
+            if ui.button("Settings folder").clicked() {
+                if let Some(path) = settings_dir_path() {
+                    if let Err(error) = open_in_file_explorer(&path) {
+                        self.status = error;
+                    }
+                } else {
+                    self.status = "Could not determine settings folder.".to_owned();
+                }
+            }
+
+            if ui.button("Program folder").clicked() {
+                match std::env::current_exe()
+                    .ok()
+                    .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+                {
+                    Some(path) => {
+                        if let Err(error) = open_in_file_explorer(&path) {
+                            self.status = error;
+                        }
+                    }
+                    None => {
+                        self.status = "Could not determine program folder.".to_owned();
+                    }
+                }
+            }
+        });
+    }
+
+    fn tool_status_text(&self, tool: RuntimeTool, installed: bool, is_downloading: bool) -> String {
+        let Some(state) = self.tool_states.get(&tool) else {
+            return if installed { "Installed".to_owned() } else { "Missing".to_owned() };
+        };
+
+        if installed {
+            "Installed".to_owned()
+        } else if is_downloading {
+            format_download_progress(state.downloaded_bytes, state.total_bytes)
+        } else if let Some(error) = &state.error {
+            format!("Failed: {error}")
+        } else {
+            "Missing".to_owned()
+        }
+    }
+
+    fn start_missing_tool_downloads(&mut self) {
+        if self.active_tool_package.is_some() {
+            return;
+        }
+
+        let packages = missing_packages(&self.lib_dir);
+        if packages.is_empty() {
+            self.tool_paths = tool_paths_if_ready(&self.lib_dir);
+            self.status = "All tools are already installed.".to_owned();
+            return;
+        }
+
+        let sender = self.worker_tx.clone();
+        let lib_dir = self.lib_dir.clone();
+        self.logs.clear();
+        self.log_auto_scroll = true;
+        self.status = "Downloading required tools...".to_owned();
+        self.active_tool_package = packages.first().copied();
+        clear_tool_errors(&mut self.tool_states, &packages);
+
+        thread::spawn(move || {
+            for package in packages {
+                let result = download_package(&sender, &lib_dir, package);
+                let is_err = result.is_err();
+                let _ = sender.send(WorkerEvent::ToolDownloadFinished { package, result });
+                if is_err {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn start_tool_download(&mut self, package: ToolPackage) {
+        if self.active_tool_package.is_some() {
+            return;
+        }
+
+        self.logs.clear();
+        self.log_auto_scroll = true;
+        self.active_tool_package = Some(package);
+        clear_tool_errors(&mut self.tool_states, &[package]);
+        self.status = format!("Downloading {}...", package_label(package));
+
+        let sender = self.worker_tx.clone();
+        let lib_dir = self.lib_dir.clone();
+
+        thread::spawn(move || {
+            let result = download_package(&sender, &lib_dir, package);
+            let _ = sender.send(WorkerEvent::ToolDownloadFinished { package, result });
+        });
+    }
+
     fn load_formats(&mut self) {
-        if self.tool_installing {
-            self.status = "Please wait while the required tools finish downloading.".to_owned();
+        if self.active_tool_package.is_some() {
+            self.status = "Please wait until the current tool download finishes.".to_owned();
             return;
         }
 
         let Some(tool_paths) = self.tool_paths.clone() else {
-            self.start_runtime_tool_install();
+            self.status = "Install all required tools from the sidebar first.".to_owned();
             return;
         };
 
@@ -699,13 +890,13 @@ impl RustTubeApp {
     }
 
     fn start_download(&mut self) {
-        if self.tool_installing {
-            self.status = "Please wait while the required tools finish downloading.".to_owned();
+        if self.active_tool_package.is_some() {
+            self.status = "Please wait until the current tool download finishes.".to_owned();
             return;
         }
 
         let Some(tool_paths) = self.tool_paths.clone() else {
-            self.start_runtime_tool_install();
+            self.status = "Install all required tools from the sidebar first.".to_owned();
             return;
         };
         let Some(downloads_dir) = self.target_download_dir() else {
@@ -854,6 +1045,39 @@ impl Drop for RustTubeApp {
     fn drop(&mut self) {
         clear_active_process(&self.active_child);
     }
+}
+
+fn package_label(package: ToolPackage) -> &'static str {
+    match package {
+        ToolPackage::YtDlp => "yt-dlp",
+        ToolPackage::FfmpegBundle => "ffmpeg + ffprobe",
+        ToolPackage::Deno => "deno",
+    }
+}
+
+fn clear_tool_errors(states: &mut HashMap<RuntimeTool, ToolUiState>, packages: &[ToolPackage]) {
+    for package in packages {
+        for tool in package.tools() {
+            if let Some(state) = states.get_mut(tool) {
+                *state = ToolUiState::default();
+            }
+        }
+    }
+}
+
+fn format_download_progress(downloaded_bytes: u64, total_bytes: Option<u64>) -> String {
+    match total_bytes {
+        Some(total) if total > 0 => format!(
+            "Downloading {}/{}",
+            format_megabytes(downloaded_bytes),
+            format_megabytes(total)
+        ),
+        _ => format!("Downloading {}", format_megabytes(downloaded_bytes)),
+    }
+}
+
+fn format_megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
 }
 
 fn suggest_thumbnail_save_path(title: &str, default_dir: &Option<PathBuf>) -> Option<PathBuf> {

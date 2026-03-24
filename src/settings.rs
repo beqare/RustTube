@@ -109,9 +109,13 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
     fs::write(path, text).map_err(|error| error.to_string())
 }
 
-fn settings_file_path() -> Option<PathBuf> {
+pub fn settings_dir_path() -> Option<PathBuf> {
     let project_dirs = ProjectDirs::from("de", "JonasGrimm", "RustTube")?;
-    Some(project_dirs.config_dir().join("settings.json"))
+    Some(project_dirs.config_dir().to_path_buf())
+}
+
+fn settings_file_path() -> Option<PathBuf> {
+    Some(settings_dir_path()?.join("settings.json"))
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<(), String> {
