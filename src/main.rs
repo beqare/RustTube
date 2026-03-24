@@ -419,6 +419,8 @@ impl RustTubeApp {
             "--no-playlist".to_owned(),
             "-P".to_owned(),
             downloads_dir.display().to_string(),
+            "-o".to_owned(),
+            "%(title)s.%(ext)s".to_owned(),
         ];
 
         match self.mode {
