@@ -106,11 +106,23 @@ function Find-GitHubCli {
         $ghCommand = Get-Command gh -ErrorAction SilentlyContinue
     }
 
-    if (-not $ghCommand) {
-        throw "GitHub CLI was not found. Install gh and log in before creating releases."
+    if ($ghCommand) {
+        return $ghCommand.Source
     }
 
-    return $ghCommand.Source
+    $candidates = @(
+        "$env:ProgramFiles\GitHub CLI\gh.exe",
+        "${env:ProgramFiles(x86)}\GitHub CLI\gh.exe",
+        "$env:LocalAppData\Programs\GitHub CLI\gh.exe"
+    )
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+
+    throw "GitHub CLI was not found. Install gh and log in before creating releases."
 }
 
 function Maybe-PublishGitHubRelease {
@@ -133,9 +145,16 @@ function Maybe-PublishGitHubRelease {
 
     Write-Host ""
     Write-Host "Publishing GitHub release $tagName..."
-    & $gh release view $tagName *> $null
+    $releaseExists = $false
+    try {
+        & $gh release view $tagName 2>$null 1>$null
+        $releaseExists = ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        $releaseExists = $false
+    }
 
-    if ($LASTEXITCODE -eq 0) {
+    if ($releaseExists) {
         & $gh release upload $tagName $installerPath --clobber
     }
     else {
@@ -149,18 +168,42 @@ function Maybe-PublishGitHubRelease {
     Write-Host "GitHub release published successfully."
 }
 
+function Test-GitHubCliSetup {
+    $gh = Find-GitHubCli
+
+    Write-Host ""
+    Write-Host "GitHub CLI found at:"
+    Write-Host "  $gh"
+    Write-Host ""
+    Write-Host "Checking GitHub authentication status..."
+
+    & $gh auth status
+    if ($LASTEXITCODE -ne 0) {
+        throw "GitHub CLI is installed, but authentication failed. Run 'gh auth login'."
+    }
+
+    Write-Host ""
+    Write-Host "GitHub CLI is ready."
+}
+
 if ([string]::IsNullOrWhiteSpace($Mode)) {
     Write-Host ""
     Write-Host "Select an action:"
+    Write-Host "  0. Check GitHub CLI"
     Write-Host "  1. Build app package"
     Write-Host "  2. Build app package + installer"
     Write-Host "  3. Build installer only"
     Write-Host ""
-    $Mode = Read-Host "Enter 1, 2 or 3"
+    $Mode = Read-Host "Enter 0, 1, 2 or 3"
 }
 
-if ($Mode -notin @("1", "2", "3")) {
-    throw "Invalid selection. Please run again and choose 1, 2 or 3."
+if ($Mode -notin @("0", "1", "2", "3")) {
+    throw "Invalid selection. Please run again and choose 0, 1, 2 or 3."
+}
+
+if ($Mode -eq "0") {
+    Test-GitHubCliSetup
+    exit 0
 }
 
 if ($Mode -eq "3") {
