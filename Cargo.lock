@@ -3039,6 +3039,7 @@ dependencies = [
  "reqwest",
  "rfd",
  "serde_json",
+ "webbrowser",
  "winresource",
 ]
 

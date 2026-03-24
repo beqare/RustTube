@@ -6,6 +6,7 @@ mod preview;
 mod process_utils;
 
 use std::{
+    fs,
     path::PathBuf,
     process::Command,
     sync::Arc,
@@ -22,6 +23,7 @@ use eframe::{
     App, Frame, NativeOptions,
     egui::{self, Color32, RichText, TextureHandle},
 };
+use image::{ImageBuffer, Rgba};
 use icon::load_app_icon;
 use preview::fetch_media_preview;
 use process_utils::{configure_background_command, run_command_streaming};
@@ -72,11 +74,7 @@ impl Default for RustTubeApp {
             .unwrap_or_default();
 
         let status = match (&tool_paths, &downloads_dir) {
-            (Some(paths), Some(downloads)) => format!(
-                "Ready. Tools folder: {} | Downloads folder: {}",
-                paths.lib_dir.display(),
-                downloads.display()
-            ),
+            (Some(_paths), Some(_downloads)) => String::new(),
             (None, _) => "Error: lib/yt-dlp.exe was not found.".to_owned(),
             (_, None) => "Error: Could not determine the Windows Downloads folder.".to_owned(),
         };
@@ -229,8 +227,10 @@ impl App for RustTubeApp {
                 }
             }
 
-            ui.add_space(12.0);
-            ui.label(RichText::new(&self.status).strong());
+            if !self.status.trim().is_empty() {
+                ui.add_space(12.0);
+                ui.label(RichText::new(&self.status).strong());
+            }
 
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -400,7 +400,6 @@ impl RustTubeApp {
             }
 
             let Some(preview) = &self.preview else {
-                ui.colored_label(Color32::GRAY, "Paste a supported URL to load a thumbnail and media info.");
                 return;
             };
 
@@ -428,6 +427,42 @@ impl RustTubeApp {
 
             ui.label("Source:");
             ui.add(egui::Label::new(preview.webpage_url.as_str()).wrap());
+
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Open source").clicked() {
+                    let _ = webbrowser::open(&preview.webpage_url);
+                }
+
+                let has_thumbnail_url = preview.thumbnail_url.is_some();
+                if ui
+                    .add_enabled(has_thumbnail_url, egui::Button::new("Open image"))
+                    .clicked()
+                {
+                    if let Some(url) = &preview.thumbnail_url {
+                        let _ = webbrowser::open(url);
+                    }
+                }
+
+                let has_thumbnail_data = preview.thumbnail_rgba.is_some();
+                if ui
+                    .add_enabled(has_thumbnail_data, egui::Button::new("Save thumbnail"))
+                    .clicked()
+                {
+                    if let Some(path) = suggest_thumbnail_save_path(&preview.title, &self.default_downloads_dir)
+                        && let Some((rgba, size)) = &preview.thumbnail_rgba
+                    {
+                        match save_thumbnail_png(path.clone(), rgba, *size) {
+                            Ok(()) => {
+                                self.status = format!("Thumbnail saved to {}", path.display());
+                            }
+                            Err(error) => {
+                                self.status = format!("Failed to save thumbnail: {error}");
+                            }
+                        }
+                    }
+                }
+            });
 
             if self.preview_texture.is_none() {
                 let cover_status = if preview.thumbnail_url.is_some() {
@@ -583,5 +618,46 @@ impl RustTubeApp {
         }
 
         Some(PathBuf::from(trimmed))
+    }
+}
+
+fn suggest_thumbnail_save_path(title: &str, default_dir: &Option<PathBuf>) -> Option<PathBuf> {
+    let file_name = format!("{}-thumbnail.png", sanitize_file_name(title));
+    let mut dialog = FileDialog::new().set_file_name(&file_name);
+
+    if let Some(dir) = default_dir {
+        dialog = dialog.set_directory(dir);
+    }
+
+    dialog.save_file()
+}
+
+fn save_thumbnail_png(path: PathBuf, rgba: &[u8], [width, height]: [usize; 2]) -> Result<(), String> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width as u32, height as u32, rgba.to_vec())
+        .ok_or_else(|| "invalid thumbnail image buffer".to_owned())?;
+
+    image.save(&path).map_err(|error| error.to_string())
+}
+
+fn sanitize_file_name(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            _ => ch,
+        })
+        .collect();
+
+    let trimmed = sanitized.trim();
+    if trimmed.is_empty() {
+        "thumbnail".to_owned()
+    } else {
+        trimmed.to_owned()
     }
 }
