@@ -15,10 +15,12 @@ use std::os::windows::process::CommandExt;
 use directories::UserDirs;
 use eframe::{
     App, Frame, NativeOptions,
-    egui::{self, Color32, RichText},
+    egui::{self, Color32, RichText, TextureHandle},
 };
 use ico::IconDir;
+use image::GenericImageView;
 use rfd::FileDialog;
+use serde_json::Value;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -26,14 +28,14 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 fn main() -> eframe::Result<()> {
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([860.0, 620.0])
-            .with_min_inner_size([720.0, 520.0])
+            .with_inner_size([1100.0, 760.0])
+            .with_min_inner_size([1040.0, 700.0])
             .with_icon(Arc::new(load_app_icon())),
         ..Default::default()
     };
 
     eframe::run_native(
-        "RustTube Downloader",
+        "RustTube",
         options,
         Box::new(|_cc| Ok(Box::<RustTubeApp>::default())),
     )
@@ -89,8 +91,23 @@ struct ToolPaths {
     yt_dlp_path: PathBuf,
 }
 
+#[derive(Clone)]
+struct MediaPreview {
+    title: String,
+    uploader: String,
+    duration: Option<String>,
+    webpage_url: String,
+    thumbnail_url: Option<String>,
+    thumbnail_rgba: Option<(Vec<u8>, [usize; 2])>,
+}
+
 enum WorkerEvent {
     LogChunk(String),
+    PreviewLoaded {
+        url: String,
+        preview: Option<MediaPreview>,
+        error: Option<String>,
+    },
     FormatsLoaded {
         entries: Vec<FormatEntry>,
     },
@@ -115,6 +132,10 @@ struct RustTubeApp {
     loading_formats: bool,
     downloading: bool,
     log_auto_scroll: bool,
+    preview_loading: bool,
+    preview_requested_url: String,
+    preview: Option<MediaPreview>,
+    preview_texture: Option<TextureHandle>,
 }
 
 impl Default for RustTubeApp {
@@ -153,163 +174,221 @@ impl Default for RustTubeApp {
             loading_formats: false,
             downloading: false,
             log_auto_scroll: true,
+            preview_loading: false,
+            preview_requested_url: String::new(),
+            preview: None,
+            preview_texture: None,
         }
     }
 }
 
 impl App for RustTubeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        self.handle_worker_events();
+        self.maybe_start_preview_fetch();
+        self.handle_worker_events(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("RustTube Downloader");
-            ui.label("Paste any URL supported by yt-dlp, choose a format and quality, then start the download.");
-            ui.add_space(10.0);
-
-            ui.horizontal(|ui| {
-                ui.label("URL:");
-                ui.add_sized(
-                    [650.0, 24.0],
-                    egui::TextEdit::singleline(&mut self.url).hint_text("https://..."),
-                );
-            });
-
-            ui.add_space(10.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Mode:");
-                egui::ComboBox::from_id_salt("download_mode")
-                    .selected_text(self.mode.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.mode, DownloadMode::Video, DownloadMode::Video.label());
-                        ui.selectable_value(&mut self.mode, DownloadMode::AudioMp3, DownloadMode::AudioMp3.label());
-                        ui.selectable_value(&mut self.mode, DownloadMode::Manual, DownloadMode::Manual.label());
-                    });
-
-                ui.label("Quality:");
-                egui::ComboBox::from_id_salt("quality")
-                    .selected_text(self.quality.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.quality, QualityPreset::Best, QualityPreset::Best.label());
-                        ui.selectable_value(&mut self.quality, QualityPreset::P1080, QualityPreset::P1080.label());
-                        ui.selectable_value(&mut self.quality, QualityPreset::P720, QualityPreset::P720.label());
-                        ui.selectable_value(&mut self.quality, QualityPreset::P480, QualityPreset::P480.label());
-                        ui.selectable_value(&mut self.quality, QualityPreset::Worst, QualityPreset::Worst.label());
-                    });
-            });
-
-            ui.add_space(10.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Target folder:");
-                ui.add_sized(
-                    [560.0, 24.0],
-                    egui::TextEdit::singleline(&mut self.download_path)
-                        .hint_text("C:\\Users\\...\\Downloads")
-                        .interactive(false),
-                );
-
-                if ui.button("Browse...").clicked() {
-                    let mut dialog = FileDialog::new();
-
-                    if let Some(current_path) = self.target_download_dir() {
-                        dialog = dialog.set_directory(current_path);
-                    } else if let Some(default_path) = &self.default_downloads_dir {
-                        dialog = dialog.set_directory(default_path);
-                    }
-
-                    if let Some(selected_folder) = dialog.pick_folder() {
-                        self.download_path = selected_folder.display().to_string();
-                    }
-                }
-
-                let can_reset = self.default_downloads_dir.is_some();
-                if ui.add_enabled(can_reset, egui::Button::new("Use default")).clicked() {
-                    if let Some(path) = &self.default_downloads_dir {
-                        self.download_path = path.display().to_string();
-                    }
-                }
-            });
-
-            ui.add_space(10.0);
-
-            ui.horizontal(|ui| {
-                let can_fetch = !self.loading_formats && self.can_run_commands();
-                if ui.add_enabled(can_fetch, egui::Button::new("Load formats")).clicked() {
-                    self.load_formats();
-                }
-
-                let can_download = !self.downloading && self.can_start_download();
-                if ui.add_enabled(can_download, egui::Button::new("Start download")).clicked() {
-                    self.start_download();
-                }
-            });
-
-            if self.mode == DownloadMode::Manual {
+            ui.columns(2, |columns| {
+                let ui = &mut columns[0];
+            ui.heading("RustTube");
+                ui.label("Paste any URL supported by yt-dlp, choose a format and quality, then start the download.");
                 ui.add_space(10.0);
-                ui.label("Manual format:");
-                if self.formats.is_empty() {
-                    ui.colored_label(Color32::YELLOW, "Click 'Load formats' first.");
-                } else {
-                    let selected_text = self
-                        .formats
-                        .get(self.selected_format)
-                        .map(|entry| entry.description.clone())
-                        .unwrap_or_else(|| "No format".to_owned());
 
-                    egui::ComboBox::from_id_salt("manual_format")
-                        .width(780.0)
-                        .selected_text(selected_text)
-                        .show_ui(ui, |ui| {
-                            for (idx, entry) in self.formats.iter().enumerate() {
-                                ui.selectable_value(&mut self.selected_format, idx, &entry.description);
-                            }
-                        });
-                }
-            }
-
-            ui.add_space(12.0);
-            ui.label(RichText::new(&self.status).strong());
-
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.label("Output / Log:");
-
-                if ui
-                    .add_enabled(!self.log_auto_scroll, egui::Button::new("Follow latest"))
-                    .clicked()
-                {
-                    self.log_auto_scroll = true;
-                }
-            });
-
-            let scroll_output = egui::ScrollArea::vertical()
-                .id_salt("log_scroll_area")
-                .stick_to_bottom(self.log_auto_scroll)
-                .max_height(360.0)
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.logs)
-                            .desired_width(f32::INFINITY)
-                            .interactive(false)
-                            .font(egui::TextStyle::Monospace),
-                    )
+                ui.horizontal(|ui| {
+                    ui.label("URL:");
+                    ui.add_sized(
+                        [650.0, 24.0],
+                        egui::TextEdit::singleline(&mut self.url).hint_text("https://..."),
+                    );
                 });
 
-            let user_scrolled = scroll_output.inner.hovered()
-                && ui.input(|input| input.raw_scroll_delta.y.abs() > 0.0);
-            if user_scrolled {
-                self.log_auto_scroll = false;
-            }
+                ui.add_space(10.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Mode:");
+                    egui::ComboBox::from_id_salt("download_mode")
+                        .selected_text(self.mode.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.mode, DownloadMode::Video, DownloadMode::Video.label());
+                            ui.selectable_value(&mut self.mode, DownloadMode::AudioMp3, DownloadMode::AudioMp3.label());
+                            ui.selectable_value(&mut self.mode, DownloadMode::Manual, DownloadMode::Manual.label());
+                        });
+
+                    ui.label("Quality:");
+                    egui::ComboBox::from_id_salt("quality")
+                        .selected_text(self.quality.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.quality, QualityPreset::Best, QualityPreset::Best.label());
+                            ui.selectable_value(&mut self.quality, QualityPreset::P1080, QualityPreset::P1080.label());
+                            ui.selectable_value(&mut self.quality, QualityPreset::P720, QualityPreset::P720.label());
+                            ui.selectable_value(&mut self.quality, QualityPreset::P480, QualityPreset::P480.label());
+                            ui.selectable_value(&mut self.quality, QualityPreset::Worst, QualityPreset::Worst.label());
+                        });
+                });
+
+                ui.add_space(10.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Target folder:");
+                    ui.add_sized(
+                        [420.0, 24.0],
+                        egui::TextEdit::singleline(&mut self.download_path)
+                            .hint_text("C:\\Users\\...\\Downloads")
+                            .interactive(false),
+                    );
+
+                    if ui.button("Browse...").clicked() {
+                        let mut dialog = FileDialog::new();
+
+                        if let Some(current_path) = self.target_download_dir() {
+                            dialog = dialog.set_directory(current_path);
+                        } else if let Some(default_path) = &self.default_downloads_dir {
+                            dialog = dialog.set_directory(default_path);
+                        }
+
+                        if let Some(selected_folder) = dialog.pick_folder() {
+                            self.download_path = selected_folder.display().to_string();
+                        }
+                    }
+
+                    let can_reset = self.default_downloads_dir.is_some();
+                    if ui.add_enabled(can_reset, egui::Button::new("Use default")).clicked() {
+                        if let Some(path) = &self.default_downloads_dir {
+                            self.download_path = path.display().to_string();
+                        }
+                    }
+                });
+
+                ui.add_space(10.0);
+
+                ui.horizontal(|ui| {
+                    let can_fetch = !self.loading_formats && self.can_run_commands();
+                    if ui.add_enabled(can_fetch, egui::Button::new("Load formats")).clicked() {
+                        self.load_formats();
+                    }
+
+                    let can_download = !self.downloading && self.can_start_download();
+                    if ui.add_enabled(can_download, egui::Button::new("Start download")).clicked() {
+                        self.start_download();
+                    }
+                });
+
+                if self.mode == DownloadMode::Manual {
+                    ui.add_space(10.0);
+                    ui.label("Manual format:");
+                    if self.formats.is_empty() {
+                        ui.colored_label(Color32::YELLOW, "Click 'Load formats' first.");
+                    } else {
+                        let selected_text = self
+                            .formats
+                            .get(self.selected_format)
+                            .map(|entry| entry.description.clone())
+                            .unwrap_or_else(|| "No format".to_owned());
+
+                        egui::ComboBox::from_id_salt("manual_format")
+                            .width(780.0)
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                for (idx, entry) in self.formats.iter().enumerate() {
+                                    ui.selectable_value(&mut self.selected_format, idx, &entry.description);
+                                }
+                            });
+                    }
+                }
+
+                ui.add_space(12.0);
+                ui.label(RichText::new(&self.status).strong());
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.label("Output / Log:");
+
+                    if ui
+                        .add_enabled(!self.log_auto_scroll, egui::Button::new("Follow latest"))
+                        .clicked()
+                    {
+                        self.log_auto_scroll = true;
+                    }
+                });
+
+                let scroll_output = egui::ScrollArea::vertical()
+                    .id_salt("log_scroll_area")
+                    .stick_to_bottom(self.log_auto_scroll)
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.logs)
+                                .desired_width(f32::INFINITY)
+                                .interactive(false)
+                                .font(egui::TextStyle::Monospace),
+                        )
+                    });
+
+                let user_scrolled = scroll_output.inner.hovered()
+                    && ui.input(|input| input.raw_scroll_delta.y.abs() > 0.0);
+                if user_scrolled {
+                    self.log_auto_scroll = false;
+                }
+
+                columns[1].set_min_width(300.0);
+                let preview_ui = &mut columns[1];
+                preview_ui.heading("Preview");
+                preview_ui.add_space(10.0);
+                self.render_preview(preview_ui);
+            });
         });
 
-        if self.loading_formats || self.downloading {
+        if self.loading_formats || self.downloading || self.preview_loading {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
     }
 }
 
 impl RustTubeApp {
+    fn maybe_start_preview_fetch(&mut self) {
+        let url = self.url.trim().to_owned();
+
+        if url.is_empty() {
+            self.preview_requested_url.clear();
+            self.preview_loading = false;
+            self.preview = None;
+            self.preview_texture = None;
+            return;
+        }
+
+        if self.preview_loading || self.preview_requested_url == url {
+            return;
+        }
+
+        let Some(tool_paths) = self.tool_paths.clone() else {
+            return;
+        };
+
+        self.preview_loading = true;
+        self.preview_requested_url = url.clone();
+        self.preview = None;
+        self.preview_texture = None;
+        let sender = self.worker_tx.clone();
+
+        thread::spawn(move || {
+            let result = fetch_media_preview(&tool_paths, &url);
+            let event = match result {
+                Ok(preview) => WorkerEvent::PreviewLoaded {
+                    url,
+                    preview: Some(preview),
+                    error: None,
+                },
+                Err(error) => WorkerEvent::PreviewLoaded {
+                    url,
+                    preview: None,
+                    error: Some(error),
+                },
+            };
+
+            let _ = sender.send(event);
+        });
+    }
+
     fn can_run_commands(&self) -> bool {
         self.tool_paths.is_some() && !self.url.trim().is_empty() && self.target_download_dir().is_some()
     }
@@ -322,11 +401,46 @@ impl RustTubeApp {
         self.mode != DownloadMode::Manual || !self.formats.is_empty()
     }
 
-    fn handle_worker_events(&mut self) {
+    fn handle_worker_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.worker_rx.try_recv() {
             match event {
                 WorkerEvent::LogChunk(chunk) => {
                     self.logs.push_str(&chunk);
+                }
+                WorkerEvent::PreviewLoaded { url, preview, error } => {
+                    if url != self.url.trim() {
+                        continue;
+                    }
+
+                    self.preview_loading = false;
+
+                    match (preview, error) {
+                        (Some(preview), None) => {
+                            self.preview_texture = preview.thumbnail_rgba.as_ref().map(|(rgba, [w, h])| {
+                                ctx.load_texture(
+                                    "media_preview_thumbnail",
+                                    egui::ColorImage::from_rgba_unmultiplied([*w, *h], rgba),
+                                    egui::TextureOptions::LINEAR,
+                                )
+                            });
+                            self.preview = Some(preview);
+                        }
+                        (_, Some(error)) => {
+                            self.preview = Some(MediaPreview {
+                                title: "Preview unavailable".to_owned(),
+                                uploader: error,
+                                duration: None,
+                                webpage_url: url,
+                                thumbnail_url: None,
+                                thumbnail_rgba: None,
+                            });
+                            self.preview_texture = None;
+                        }
+                        _ => {
+                            self.preview = None;
+                            self.preview_texture = None;
+                        }
+                    }
                 }
                 WorkerEvent::FormatsLoaded { entries } => {
                     self.loading_formats = false;
@@ -348,6 +462,63 @@ impl RustTubeApp {
                 }
             }
         }
+    }
+
+    fn render_preview(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_min_width(280.0);
+
+            if self.preview_loading {
+                ui.label("Loading preview...");
+                return;
+            }
+
+            let Some(preview) = &self.preview else {
+                ui.colored_label(Color32::GRAY, "Paste a supported URL to load a thumbnail and media info.");
+                return;
+            };
+
+            if let Some(texture) = &self.preview_texture {
+                let available_width = ui.available_width().clamp(180.0, 320.0);
+                let texture_size = texture.size_vec2();
+                let max_height = 180.0;
+                let width_scale = available_width / texture_size.x;
+                let height_scale = max_height / texture_size.y;
+                let scale = width_scale.min(height_scale).min(1.0);
+                let display_size = texture_size * scale;
+                ui.vertical_centered(|ui| {
+                    ui.add(egui::Image::new(texture).fit_to_exact_size(display_size));
+                });
+                ui.add_space(10.0);
+            }
+
+            ui.label(RichText::new(&preview.title).strong().size(18.0));
+            ui.add_space(4.0);
+            ui.label(format!("Creator: {}", preview.uploader));
+
+            if let Some(duration) = &preview.duration {
+                ui.label(format!("Duration: {duration}"));
+            }
+
+            ui.label(format!("Source: {}", preview.webpage_url));
+
+            if self.preview_texture.is_none() {
+                let cover_status = if preview.thumbnail_url.is_some() {
+                    "Thumbnail was found, but could not be rendered."
+                } else {
+                    "No thumbnail was provided for this media."
+                };
+                ui.colored_label(Color32::GRAY, cover_status);
+            }
+
+            if self.mode == DownloadMode::AudioMp3 {
+                ui.add_space(6.0);
+                ui.colored_label(
+                    Color32::LIGHT_GREEN,
+                    "MP3 downloads include metadata and embedded cover art when yt-dlp provides it.",
+                );
+            }
+        });
     }
 
     fn load_formats(&mut self) {
@@ -436,6 +607,8 @@ impl RustTubeApp {
                 args.push("mp3".to_owned());
                 args.push("--audio-quality".to_owned());
                 args.push(audio_quality(&self.quality).to_owned());
+                args.push("--add-metadata".to_owned());
+                args.push("--embed-thumbnail".to_owned());
             }
             DownloadMode::Manual => {
                 let Some(entry) = self.formats.get(self.selected_format) else {
@@ -542,6 +715,102 @@ fn audio_quality(quality: &QualityPreset) -> &'static str {
         QualityPreset::P720 => "4",
         QualityPreset::P480 => "6",
         QualityPreset::Worst => "9",
+    }
+}
+
+fn fetch_media_preview(tool_paths: &ToolPaths, url: &str) -> Result<MediaPreview, String> {
+    let mut command = Command::new(&tool_paths.yt_dlp_path);
+    command.args(tool_command_prefix(&tool_paths.lib_dir)).args([
+        "--dump-single-json".to_owned(),
+        "--skip-download".to_owned(),
+        "--no-playlist".to_owned(),
+        url.to_owned(),
+    ]);
+    configure_background_command(&mut command);
+
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not load preview: {error}"))?;
+
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    if text.trim().is_empty() && !output.stderr.is_empty() {
+        text = String::from_utf8_lossy(&output.stderr).to_string();
+    }
+
+    let json: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("Could not parse preview data: {error}"))?;
+
+    let title = json
+        .get("track")
+        .and_then(Value::as_str)
+        .or_else(|| json.get("title").and_then(Value::as_str))
+        .unwrap_or("Unknown title")
+        .to_owned();
+
+    let uploader = json
+        .get("artist")
+        .and_then(Value::as_str)
+        .or_else(|| json.get("uploader").and_then(Value::as_str))
+        .or_else(|| json.get("channel").and_then(Value::as_str))
+        .unwrap_or("Unknown creator")
+        .to_owned();
+
+    let duration = json
+        .get("duration")
+        .and_then(Value::as_f64)
+        .map(|seconds| format_duration(seconds as u64));
+
+    let webpage_url = json
+        .get("webpage_url")
+        .and_then(Value::as_str)
+        .unwrap_or(url)
+        .to_owned();
+
+    let thumbnail_url = json
+        .get("thumbnail")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
+    let thumbnail_rgba = thumbnail_url
+        .as_deref()
+        .and_then(|thumb_url| download_thumbnail(thumb_url).ok());
+
+    Ok(MediaPreview {
+        title,
+        uploader,
+        duration,
+        webpage_url,
+        thumbnail_url,
+        thumbnail_rgba,
+    })
+}
+
+fn download_thumbnail(url: &str) -> Result<(Vec<u8>, [usize; 2]), String> {
+    let response = reqwest::blocking::get(url)
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| format!("Could not download thumbnail: {error}"))?;
+
+    let bytes = response
+        .bytes()
+        .map_err(|error| format!("Could not read thumbnail bytes: {error}"))?;
+
+    let image = image::load_from_memory(&bytes)
+        .map_err(|error| format!("Could not decode thumbnail: {error}"))?;
+    let rgba = image.to_rgba8();
+    let (width, height) = image.dimensions();
+
+    Ok((rgba.into_raw(), [width as usize, height as usize]))
+}
+
+fn format_duration(total_seconds: u64) -> String {
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
     }
 }
 
