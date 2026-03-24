@@ -110,155 +110,158 @@ impl App for RustTubeApp {
         self.maybe_start_preview_fetch();
         self.handle_worker_events(ctx);
 
+        egui::SidePanel::right("preview_panel")
+            .min_width(320.0)
+            .max_width(320.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.heading("Preview");
+                ui.add_space(10.0);
+                self.render_preview(ui);
+            });
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.columns(2, |columns| {
-                let ui = &mut columns[0];
-                ui.heading("RustTube");
-                ui.label("Paste any URL supported by yt-dlp, choose a format and quality, then start the download.");
-                ui.add_space(10.0);
+            ui.heading("RustTube");
+            ui.label("Paste any URL supported by yt-dlp, choose a format and quality, then start the download.");
+            ui.add_space(10.0);
 
-                ui.horizontal(|ui| {
-                    ui.label("URL:");
-                    ui.add_sized(
-                        [650.0, 24.0],
-                        egui::TextEdit::singleline(&mut self.url).hint_text("https://..."),
-                    );
-                });
+            ui.horizontal(|ui| {
+                ui.label("URL:");
+                let input_width = (ui.available_width() - 50.0).max(220.0);
+                ui.add_sized(
+                    [input_width, 24.0],
+                    egui::TextEdit::singleline(&mut self.url).hint_text("https://..."),
+                );
+            });
 
-                ui.add_space(10.0);
+            ui.add_space(10.0);
 
-                ui.horizontal(|ui| {
-                    ui.label("Mode:");
-                    egui::ComboBox::from_id_salt("download_mode")
-                        .selected_text(self.mode.label())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.mode, DownloadMode::Video, DownloadMode::Video.label());
-                            ui.selectable_value(&mut self.mode, DownloadMode::AudioMp3, DownloadMode::AudioMp3.label());
-                            ui.selectable_value(&mut self.mode, DownloadMode::Manual, DownloadMode::Manual.label());
-                        });
-
-                    ui.label("Quality:");
-                    egui::ComboBox::from_id_salt("quality")
-                        .selected_text(self.quality.label())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.quality, QualityPreset::Best, QualityPreset::Best.label());
-                            ui.selectable_value(&mut self.quality, QualityPreset::P1080, QualityPreset::P1080.label());
-                            ui.selectable_value(&mut self.quality, QualityPreset::P720, QualityPreset::P720.label());
-                            ui.selectable_value(&mut self.quality, QualityPreset::P480, QualityPreset::P480.label());
-                            ui.selectable_value(&mut self.quality, QualityPreset::Worst, QualityPreset::Worst.label());
-                        });
-                });
-
-                ui.add_space(10.0);
-
-                ui.horizontal(|ui| {
-                    ui.label("Target folder:");
-                    ui.add_sized(
-                        [420.0, 24.0],
-                        egui::TextEdit::singleline(&mut self.download_path)
-                            .hint_text("C:\\Users\\...\\Downloads")
-                            .interactive(false),
-                    );
-
-                    if ui.button("Browse...").clicked() {
-                        let mut dialog = FileDialog::new();
-
-                        if let Some(current_path) = self.target_download_dir() {
-                            dialog = dialog.set_directory(current_path);
-                        } else if let Some(default_path) = &self.default_downloads_dir {
-                            dialog = dialog.set_directory(default_path);
-                        }
-
-                        if let Some(selected_folder) = dialog.pick_folder() {
-                            self.download_path = selected_folder.display().to_string();
-                        }
-                    }
-
-                    let can_reset = self.default_downloads_dir.is_some();
-                    if ui.add_enabled(can_reset, egui::Button::new("Use default")).clicked() {
-                        if let Some(path) = &self.default_downloads_dir {
-                            self.download_path = path.display().to_string();
-                        }
-                    }
-                });
-
-                ui.add_space(10.0);
-
-                ui.horizontal(|ui| {
-                    let can_fetch = !self.loading_formats && self.can_run_commands();
-                    if ui.add_enabled(can_fetch, egui::Button::new("Load formats")).clicked() {
-                        self.load_formats();
-                    }
-
-                    let can_download = !self.downloading && self.can_start_download();
-                    if ui.add_enabled(can_download, egui::Button::new("Start download")).clicked() {
-                        self.start_download();
-                    }
-                });
-
-                if self.mode == DownloadMode::Manual {
-                    ui.add_space(10.0);
-                    ui.label("Manual format:");
-                    if self.formats.is_empty() {
-                        ui.colored_label(Color32::YELLOW, "Click 'Load formats' first.");
-                    } else {
-                        let selected_text = self
-                            .formats
-                            .get(self.selected_format)
-                            .map(|entry| entry.description.clone())
-                            .unwrap_or_else(|| "No format".to_owned());
-
-                        egui::ComboBox::from_id_salt("manual_format")
-                            .width(780.0)
-                            .selected_text(selected_text)
-                            .show_ui(ui, |ui| {
-                                for (idx, entry) in self.formats.iter().enumerate() {
-                                    ui.selectable_value(&mut self.selected_format, idx, &entry.description);
-                                }
-                            });
-                    }
-                }
-
-                ui.add_space(12.0);
-                ui.label(RichText::new(&self.status).strong());
-
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.label("Output / Log:");
-
-                    if ui
-                        .add_enabled(!self.log_auto_scroll, egui::Button::new("Follow latest"))
-                        .clicked()
-                    {
-                        self.log_auto_scroll = true;
-                    }
-                });
-
-                let scroll_output = egui::ScrollArea::vertical()
-                    .id_salt("log_scroll_area")
-                    .stick_to_bottom(self.log_auto_scroll)
-                    .max_height(360.0)
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.logs)
-                                .desired_width(f32::INFINITY)
-                                .interactive(false)
-                                .font(egui::TextStyle::Monospace),
-                        )
+            ui.horizontal(|ui| {
+                ui.label("Mode:");
+                egui::ComboBox::from_id_salt("download_mode")
+                    .selected_text(self.mode.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.mode, DownloadMode::Video, DownloadMode::Video.label());
+                        ui.selectable_value(&mut self.mode, DownloadMode::AudioMp3, DownloadMode::AudioMp3.label());
+                        ui.selectable_value(&mut self.mode, DownloadMode::Manual, DownloadMode::Manual.label());
                     });
 
-                let user_scrolled =
-                    scroll_output.inner.hovered() && ui.input(|input| input.raw_scroll_delta.y.abs() > 0.0);
-                if user_scrolled {
-                    self.log_auto_scroll = false;
+                ui.label("Quality:");
+                egui::ComboBox::from_id_salt("quality")
+                    .selected_text(self.quality.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.quality, QualityPreset::Best, QualityPreset::Best.label());
+                        ui.selectable_value(&mut self.quality, QualityPreset::P1080, QualityPreset::P1080.label());
+                        ui.selectable_value(&mut self.quality, QualityPreset::P720, QualityPreset::P720.label());
+                        ui.selectable_value(&mut self.quality, QualityPreset::P480, QualityPreset::P480.label());
+                        ui.selectable_value(&mut self.quality, QualityPreset::Worst, QualityPreset::Worst.label());
+                    });
+            });
+
+            ui.add_space(10.0);
+
+            ui.horizontal(|ui| {
+                ui.label("Target folder:");
+                let path_width = (ui.available_width() - 190.0).max(160.0);
+                ui.add_sized(
+                    [path_width, 24.0],
+                    egui::TextEdit::singleline(&mut self.download_path)
+                        .hint_text("C:\\Users\\...\\Downloads")
+                        .interactive(false),
+                );
+
+                if ui.button("Browse...").clicked() {
+                    let mut dialog = FileDialog::new();
+
+                    if let Some(current_path) = self.target_download_dir() {
+                        dialog = dialog.set_directory(current_path);
+                    } else if let Some(default_path) = &self.default_downloads_dir {
+                        dialog = dialog.set_directory(default_path);
+                    }
+
+                    if let Some(selected_folder) = dialog.pick_folder() {
+                        self.download_path = selected_folder.display().to_string();
+                    }
                 }
 
-                columns[1].set_min_width(300.0);
-                let preview_ui = &mut columns[1];
-                preview_ui.heading("Preview");
-                preview_ui.add_space(10.0);
-                self.render_preview(preview_ui);
+                let can_reset = self.default_downloads_dir.is_some();
+                if ui.add_enabled(can_reset, egui::Button::new("Use default")).clicked() {
+                    if let Some(path) = &self.default_downloads_dir {
+                        self.download_path = path.display().to_string();
+                    }
+                }
             });
+
+            ui.add_space(10.0);
+
+            ui.horizontal(|ui| {
+                let can_fetch = !self.loading_formats && self.can_run_commands();
+                if ui.add_enabled(can_fetch, egui::Button::new("Load formats")).clicked() {
+                    self.load_formats();
+                }
+
+                let can_download = !self.downloading && self.can_start_download();
+                if ui.add_enabled(can_download, egui::Button::new("Start download")).clicked() {
+                    self.start_download();
+                }
+            });
+
+            if self.mode == DownloadMode::Manual {
+                ui.add_space(10.0);
+                ui.label("Manual format:");
+                if self.formats.is_empty() {
+                    ui.colored_label(Color32::YELLOW, "Click 'Load formats' first.");
+                } else {
+                    let selected_text = self
+                        .formats
+                        .get(self.selected_format)
+                        .map(|entry| entry.description.clone())
+                        .unwrap_or_else(|| "No format".to_owned());
+
+                    egui::ComboBox::from_id_salt("manual_format")
+                        .width(ui.available_width().max(220.0))
+                        .selected_text(selected_text)
+                        .show_ui(ui, |ui| {
+                            for (idx, entry) in self.formats.iter().enumerate() {
+                                ui.selectable_value(&mut self.selected_format, idx, &entry.description);
+                            }
+                        });
+                }
+            }
+
+            ui.add_space(12.0);
+            ui.label(RichText::new(&self.status).strong());
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label("Output / Log:");
+
+                if ui
+                    .add_enabled(!self.log_auto_scroll, egui::Button::new("Follow latest"))
+                    .clicked()
+                {
+                    self.log_auto_scroll = true;
+                }
+            });
+
+            let scroll_output = egui::ScrollArea::vertical()
+                .id_salt("log_scroll_area")
+                .stick_to_bottom(self.log_auto_scroll)
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.logs)
+                            .desired_width(f32::INFINITY)
+                            .interactive(false)
+                            .font(egui::TextStyle::Monospace),
+                    )
+                });
+
+            let user_scrolled =
+                scroll_output.inner.hovered() && ui.input(|input| input.raw_scroll_delta.y.abs() > 0.0);
+            if user_scrolled {
+                self.log_auto_scroll = false;
+            }
         });
 
         if self.loading_formats || self.downloading || self.preview_loading {
@@ -402,9 +405,9 @@ impl RustTubeApp {
             };
 
             if let Some(texture) = &self.preview_texture {
-                let available_width = ui.available_width().clamp(180.0, 320.0);
+                let available_width = ui.available_width().clamp(160.0, 260.0);
                 let texture_size = texture.size_vec2();
-                let max_height = 180.0;
+                let max_height = 150.0;
                 let width_scale = available_width / texture_size.x;
                 let height_scale = max_height / texture_size.y;
                 let scale = width_scale.min(height_scale).min(1.0);
@@ -423,7 +426,8 @@ impl RustTubeApp {
                 ui.label(format!("Duration: {duration}"));
             }
 
-            ui.label(format!("Source: {}", preview.webpage_url));
+            ui.label("Source:");
+            ui.add(egui::Label::new(preview.webpage_url.as_str()).wrap());
 
             if self.preview_texture.is_none() {
                 let cover_status = if preview.thumbnail_url.is_some() {
