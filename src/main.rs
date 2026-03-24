@@ -60,6 +60,7 @@ struct RustTubeApp {
     worker_rx: Receiver<WorkerEvent>,
     loading_formats: bool,
     downloading: bool,
+    cancel_requested: bool,
     log_auto_scroll: bool,
     preview_loading: bool,
     preview_requested_url: String,
@@ -117,6 +118,7 @@ impl Default for RustTubeApp {
             worker_rx,
             loading_formats: false,
             downloading: false,
+            cancel_requested: false,
             log_auto_scroll: true,
             preview_loading: false,
             preview_requested_url: String::new(),
@@ -246,11 +248,12 @@ impl App for RustTubeApp {
 
                 let can_cancel = self.downloading;
                 if ui.add_enabled(can_cancel, egui::Button::new("Cancel")).clicked() {
-                    match cancel_child_process(&self.active_child) {
-                        Ok(true) => {
-                            self.status = "Cancel requested...".to_owned();
-                            self.progress.phase = ProgressPhase::Canceled;
-                        }
+                        match cancel_child_process(&self.active_child) {
+                            Ok(true) => {
+                                self.cancel_requested = true;
+                                self.status = "Cancel requested...".to_owned();
+                                self.progress.phase = ProgressPhase::Canceled;
+                            }
                         Ok(false) => {
                             self.status = "No active download to cancel.".to_owned();
                         }
@@ -466,17 +469,19 @@ impl RustTubeApp {
                 }
                 WorkerEvent::DownloadFinished { success, canceled } => {
                     self.downloading = false;
+                    let was_canceled = canceled || self.cancel_requested;
+                    self.cancel_requested = false;
                     if success {
                         self.progress.phase = ProgressPhase::Finished;
                         self.progress.percent = Some(1.0);
-                    } else if canceled || self.progress.phase == ProgressPhase::Canceled {
+                    } else if was_canceled || self.progress.phase == ProgressPhase::Canceled {
                         self.progress.phase = ProgressPhase::Canceled;
                     } else {
                         self.progress.phase = ProgressPhase::Failed;
                     }
                     self.status = if success {
                         "Download finished.".to_owned()
-                    } else if canceled || self.progress.phase == ProgressPhase::Canceled {
+                    } else if was_canceled || self.progress.phase == ProgressPhase::Canceled {
                         "Download canceled.".to_owned()
                     } else {
                         "Download failed. See the log for details.".to_owned()
@@ -681,6 +686,7 @@ impl RustTubeApp {
         args.push(url);
 
         self.downloading = true;
+        self.cancel_requested = false;
         self.status = "Download in progress...".to_owned();
         self.logs.clear();
         self.log_auto_scroll = true;
