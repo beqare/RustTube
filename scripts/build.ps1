@@ -100,6 +100,55 @@ function Build-Installer {
     }
 }
 
+function Find-GitHubCli {
+    $ghCommand = Get-Command gh.exe -ErrorAction SilentlyContinue
+    if (-not $ghCommand) {
+        $ghCommand = Get-Command gh -ErrorAction SilentlyContinue
+    }
+
+    if (-not $ghCommand) {
+        throw "GitHub CLI was not found. Install gh and log in before creating releases."
+    }
+
+    return $ghCommand.Source
+}
+
+function Maybe-PublishGitHubRelease {
+    $appVersion = Read-CargoVersion
+    $tagName = "v$appVersion"
+    $installerPath = Join-Path $root "dist\installer\RustTube-Setup.exe"
+
+    if (-not (Test-Path $installerPath)) {
+        throw "Installer file was not found at $installerPath"
+    }
+
+    $answer = Read-Host "Create GitHub release $tagName and upload RustTube-Setup.exe? (y/n)"
+    if ($answer -notmatch '^(y|yes)$') {
+        Write-Host ""
+        Write-Host "Skipped GitHub release creation."
+        return
+    }
+
+    $gh = Find-GitHubCli
+
+    Write-Host ""
+    Write-Host "Publishing GitHub release $tagName..."
+    & $gh release view $tagName *> $null
+
+    if ($LASTEXITCODE -eq 0) {
+        & $gh release upload $tagName $installerPath --clobber
+    }
+    else {
+        & $gh release create $tagName $installerPath --title $tagName --generate-notes
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "GitHub release upload failed."
+    }
+
+    Write-Host "GitHub release published successfully."
+}
+
 if ([string]::IsNullOrWhiteSpace($Mode)) {
     Write-Host ""
     Write-Host "Select an action:"
@@ -119,6 +168,7 @@ if ($Mode -eq "3") {
     Write-Host ""
     Write-Host "Installer finished successfully."
     Write-Host "Installer output should be in dist\installer"
+    Maybe-PublishGitHubRelease
 }
 else {
     Update-CargoVersion
@@ -128,8 +178,9 @@ else {
 if ($Mode -eq "2") {
     Build-Installer
     Write-Host ""
-    Write-Host "Release finished successfully."
+    Write-Host "Installer build finished successfully."
     Write-Host "Installer output should be in dist\installer"
+    Maybe-PublishGitHubRelease
 }
 elseif ($Mode -eq "1") {
     Write-Host ""
