@@ -1,5 +1,31 @@
-/target
-lib/ffmpeg.exe
-lib/ffplay.exe
-lib/ffprobe.exe
-lib/yt-dlp.exe
+/target/
+/dist/
+/lib/*
+!/lib/.gitkeep
+
+# Rust backup files
+**/*.rs.bk
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.suo
+*.user
+*.userossc
+*.sln.docstates
+
+# Temporary files
+*.tmp
+*.temp
+*.bak

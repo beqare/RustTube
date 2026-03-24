@@ -7,3 +7,11 @@ build = "build.rs"
 [dependencies]
 directories = "6.0.0"
 eframe = { version = "0.33.0", default-features = true }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = 0

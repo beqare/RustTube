@@ -37,6 +37,8 @@ fn find_profile_dir(start: &Path, profile: &str) -> Option<PathBuf> {
 fn sync_dir(source: &Path, destination: &Path) -> io::Result<()> {
     fs::create_dir_all(destination)?;
 
+    remove_unwanted_files(destination)?;
+
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let source_path = entry.path();
@@ -45,8 +47,38 @@ fn sync_dir(source: &Path, destination: &Path) -> io::Result<()> {
 
         if metadata.is_dir() {
             sync_dir(&source_path, &destination_path)?;
-        } else if metadata.is_file() {
+        } else if metadata.is_file() && should_copy_file(&source_path) {
             fs::copy(&source_path, &destination_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn should_copy_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    matches!(name.to_ascii_lowercase().as_str(), "yt-dlp.exe" | "ffmpeg.exe" | "ffprobe.exe" | "deno.exe")
+}
+
+fn remove_unwanted_files(destination: &Path) -> io::Result<()> {
+    if !destination.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(destination)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = entry.metadata()?;
+
+        if metadata.is_dir() {
+            continue;
+        }
+
+        if !should_copy_file(&path) {
+            fs::remove_file(path)?;
         }
     }
 

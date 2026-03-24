@@ -40,7 +40,7 @@ impl DownloadMode {
         match self {
             Self::Video => "Video",
             Self::AudioMp3 => "Audio (MP3)",
-            Self::Manual => "Manuelles yt-dlp-Format",
+            Self::Manual => "Manual yt-dlp format",
         }
     }
 }
@@ -57,11 +57,11 @@ enum QualityPreset {
 impl QualityPreset {
     fn label(&self) -> &'static str {
         match self {
-            Self::Best => "Beste verfuegbare Qualitaet",
-            Self::P1080 => "Bis 1080p",
-            Self::P720 => "Bis 720p",
-            Self::P480 => "Bis 480p",
-            Self::Worst => "Kleinste Qualitaet",
+            Self::Best => "Best available quality",
+            Self::P1080 => "Up to 1080p",
+            Self::P720 => "Up to 720p",
+            Self::P480 => "Up to 480p",
+            Self::Worst => "Lowest quality",
         }
     }
 }
@@ -113,12 +113,12 @@ impl Default for RustTubeApp {
 
         let status = match (&tool_paths, &downloads_dir) {
             (Some(paths), Some(downloads)) => format!(
-                "Bereit. Tool-Ordner: {} | Download-Ordner: {}",
+                "Ready. Tools folder: {} | Downloads folder: {}",
                 paths.lib_dir.display(),
                 downloads.display()
             ),
-            (None, _) => "Fehler: lib/yt-dlp.exe wurde nicht gefunden.".to_owned(),
-            (_, None) => "Fehler: Windows Download-Ordner konnte nicht ermittelt werden.".to_owned(),
+            (None, _) => "Error: lib/yt-dlp.exe was not found.".to_owned(),
+            (_, None) => "Error: Could not determine the Windows Downloads folder.".to_owned(),
         };
 
         Self {
@@ -145,11 +145,11 @@ impl App for RustTubeApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("RustTube Downloader");
-            ui.label("Fuege einen von yt-dlp unterstuetzten Link ein, waehle Format/Qualitaet und starte den Download.");
+            ui.label("Paste any URL supported by yt-dlp, choose a format and quality, then start the download.");
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {
-                ui.label("Link:");
+                ui.label("URL:");
                 ui.add_sized(
                     [650.0, 24.0],
                     egui::TextEdit::singleline(&mut self.url).hint_text("https://..."),
@@ -159,7 +159,7 @@ impl App for RustTubeApp {
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {
-                ui.label("Modus:");
+                ui.label("Mode:");
                 egui::ComboBox::from_id_salt("download_mode")
                     .selected_text(self.mode.label())
                     .show_ui(ui, |ui| {
@@ -168,7 +168,7 @@ impl App for RustTubeApp {
                         ui.selectable_value(&mut self.mode, DownloadMode::Manual, DownloadMode::Manual.label());
                     });
 
-                ui.label("Qualitaet:");
+                ui.label("Quality:");
                 egui::ComboBox::from_id_salt("quality")
                     .selected_text(self.quality.label())
                     .show_ui(ui, |ui| {
@@ -184,27 +184,27 @@ impl App for RustTubeApp {
 
             ui.horizontal(|ui| {
                 let can_fetch = !self.loading_formats && self.can_run_commands();
-                if ui.add_enabled(can_fetch, egui::Button::new("Formate laden")).clicked() {
+                if ui.add_enabled(can_fetch, egui::Button::new("Load formats")).clicked() {
                     self.load_formats();
                 }
 
                 let can_download = !self.downloading && self.can_start_download();
-                if ui.add_enabled(can_download, egui::Button::new("Download starten")).clicked() {
+                if ui.add_enabled(can_download, egui::Button::new("Start download")).clicked() {
                     self.start_download();
                 }
             });
 
             if self.mode == DownloadMode::Manual {
                 ui.add_space(10.0);
-                ui.label("Manuelles Format:");
+                ui.label("Manual format:");
                 if self.formats.is_empty() {
-                    ui.colored_label(Color32::YELLOW, "Bitte zuerst 'Formate laden' klicken.");
+                    ui.colored_label(Color32::YELLOW, "Click 'Load formats' first.");
                 } else {
                     let selected_text = self
                         .formats
                         .get(self.selected_format)
                         .map(|entry| entry.description.clone())
-                        .unwrap_or_else(|| "Kein Format".to_owned());
+                        .unwrap_or_else(|| "No format".to_owned());
 
                     egui::ComboBox::from_id_salt("manual_format")
                         .width(780.0)
@@ -221,11 +221,11 @@ impl App for RustTubeApp {
             ui.label(RichText::new(&self.status).strong());
 
             if let Some(downloads) = &self.downloads_dir {
-                ui.label(format!("Zielordner: {}", downloads.display()));
+                ui.label(format!("Target folder: {}", downloads.display()));
             }
 
             ui.add_space(10.0);
-            ui.label("Ausgabe / Log:");
+            ui.label("Output / Log:");
             ui.add(
                 egui::TextEdit::multiline(&mut self.logs)
                     .desired_rows(22)
@@ -259,10 +259,10 @@ impl RustTubeApp {
                     self.loading_formats = false;
                     self.logs = raw_output;
                     if entries.is_empty() {
-                        self.status = "Keine Formate erkannt. Manche Seiten liefern nur wenige oder spezielle Streams.".to_owned();
+                        self.status = "No formats detected. Some sites expose only a few or unusual streams.".to_owned();
                     } else {
                         self.selected_format = 0;
-                        self.status = format!("{} Formate geladen.", entries.len());
+                        self.status = format!("Loaded {} formats.", entries.len());
                     }
                     self.formats = entries;
                 }
@@ -270,9 +270,9 @@ impl RustTubeApp {
                     self.downloading = false;
                     self.logs = output;
                     self.status = if success {
-                        "Download abgeschlossen.".to_owned()
+                        "Download finished.".to_owned()
                     } else {
-                        "Download fehlgeschlagen. Details stehen im Log.".to_owned()
+                        "Download failed. See the log for details.".to_owned()
                     };
                 }
             }
@@ -281,18 +281,18 @@ impl RustTubeApp {
 
     fn load_formats(&mut self) {
         let Some(tool_paths) = self.tool_paths.clone() else {
-            self.status = "yt-dlp.exe fehlt in lib/.".to_owned();
+            self.status = "yt-dlp.exe is missing in lib/.".to_owned();
             return;
         };
 
         let url = self.url.trim().to_owned();
         if url.is_empty() {
-            self.status = "Bitte zuerst einen Link eingeben.".to_owned();
+            self.status = "Please enter a URL first.".to_owned();
             return;
         }
 
         self.loading_formats = true;
-        self.status = "Lade verfuegbare Formate...".to_owned();
+        self.status = "Loading available formats...".to_owned();
         let sender = self.worker_tx.clone();
 
         thread::spawn(move || {
@@ -314,7 +314,7 @@ impl RustTubeApp {
                 }
                 Err(error) => WorkerEvent::FormatsLoaded {
                     entries: Vec::new(),
-                    raw_output: format!("Fehler beim Starten von yt-dlp: {error}"),
+                    raw_output: format!("Failed to start yt-dlp: {error}"),
                 },
             };
 
@@ -324,17 +324,17 @@ impl RustTubeApp {
 
     fn start_download(&mut self) {
         let Some(tool_paths) = self.tool_paths.clone() else {
-            self.status = "yt-dlp.exe fehlt in lib/.".to_owned();
+            self.status = "yt-dlp.exe is missing in lib/.".to_owned();
             return;
         };
         let Some(downloads_dir) = self.downloads_dir.clone() else {
-            self.status = "Download-Ordner konnte nicht gefunden werden.".to_owned();
+            self.status = "Could not find the Downloads folder.".to_owned();
             return;
         };
 
         let url = self.url.trim().to_owned();
         if url.is_empty() {
-            self.status = "Bitte zuerst einen Link eingeben.".to_owned();
+            self.status = "Please enter a URL first.".to_owned();
             return;
         }
 
@@ -362,7 +362,7 @@ impl RustTubeApp {
             }
             DownloadMode::Manual => {
                 let Some(entry) = self.formats.get(self.selected_format) else {
-                    self.status = "Bitte zuerst ein Format auswaehlen.".to_owned();
+                    self.status = "Please select a format first.".to_owned();
                     return;
                 };
                 args.push("-f".to_owned());
@@ -373,7 +373,7 @@ impl RustTubeApp {
         args.push(url);
 
         self.downloading = true;
-        self.status = "Download laeuft...".to_owned();
+        self.status = "Download in progress...".to_owned();
         let sender = self.worker_tx.clone();
 
         thread::spawn(move || {
@@ -396,7 +396,7 @@ impl RustTubeApp {
                 }
                 Err(error) => WorkerEvent::DownloadFinished {
                     success: false,
-                    output: format!("Fehler beim Starten von yt-dlp: {error}"),
+                    output: format!("Failed to start yt-dlp: {error}"),
                 },
             };
 
@@ -453,8 +453,8 @@ fn audio_quality(quality: &QualityPreset) -> &'static str {
 fn tool_command_prefix(lib_dir: &Path) -> Vec<String> {
     let mut args = vec!["--ffmpeg-location".to_owned(), lib_dir.display().to_string()];
 
-    let deno_path = lib_dir.join("deno.exe");
-    if deno_path.is_file() {
+    let deno_path = find_deno_in_lib(lib_dir);
+    if let Some(deno_path) = deno_path {
         args.push("--js-runtimes".to_owned());
         args.push(format!("deno:{}", deno_path.display()));
     }
@@ -481,4 +481,14 @@ fn find_tool_paths() -> Option<ToolPaths> {
         let yt_dlp_path = lib_dir.join("yt-dlp.exe");
         yt_dlp_path.is_file().then_some(ToolPaths { lib_dir, yt_dlp_path })
     })
+}
+
+fn find_deno_in_lib(lib_dir: &Path) -> Option<PathBuf> {
+    let candidates = [
+        lib_dir.join("deno.exe"),
+        lib_dir.join("bin").join("deno.exe"),
+        lib_dir.join("deno").join("bin").join("deno.exe"),
+    ];
+
+    candidates.into_iter().find(|path| path.is_file())
 }
