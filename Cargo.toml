@@ -1,0 +1,9 @@
+[package]
+name = "rusttube_gui"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+directories = "6.0.0"
+eframe = { version = "0.33.0", default-features = true }
