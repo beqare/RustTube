@@ -140,7 +140,7 @@ function Find-GitHubCli {
     throw "GitHub CLI was not found. Install gh and log in before creating releases."
 }
 
-function Maybe-PublishGitHubRelease {
+function Publish-GitHubReleaseIfRequested {
     $appVersion = Read-CargoVersion
     $tagName = "v$appVersion"
     $installerPath = Join-Path $root "dist\installer\RustTube-Setup.exe"
@@ -226,7 +226,7 @@ if ($Mode -eq "3") {
     Write-Host ""
     Write-Host "Installer finished successfully."
     Write-Host "Installer output should be in dist\installer"
-    Maybe-PublishGitHubRelease
+    Publish-GitHubReleaseIfRequested
 }
 else {
     $versionUpdate = Update-CargoVersion
@@ -246,7 +246,7 @@ if ($Mode -eq "2") {
     Write-Host ""
     Write-Host "Installer build finished successfully."
     Write-Host "Installer output should be in dist\installer"
-    Maybe-PublishGitHubRelease
+    Publish-GitHubReleaseIfRequested
 }
 elseif ($Mode -eq "1") {
     Write-Host ""
