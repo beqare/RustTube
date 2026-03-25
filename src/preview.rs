@@ -22,12 +22,25 @@ pub fn fetch_media_preview(tool_paths: &ToolPaths, url: &str) -> Result<MediaPre
         .output()
         .map_err(|error| format!("Could not load preview: {error}"))?;
 
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    if text.trim().is_empty() && !output.stderr.is_empty() {
-        text = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        let details = stderr.trim().or_else_if_empty(stdout.trim());
+        let message = if details.is_empty() {
+            format!("yt-dlp exited with status {}", output.status)
+        } else {
+            details.to_owned()
+        };
+        return Err(format!("Could not load preview: {message}"));
     }
 
-    let json: Value = serde_json::from_str(&text)
+    let text = stdout.trim();
+    if text.is_empty() {
+        return Err("Could not load preview: yt-dlp returned no preview data".to_owned());
+    }
+
+    let json: Value = serde_json::from_str(text)
         .map_err(|error| format!("Could not parse preview data: {error}"))?;
 
     let title = json
@@ -101,5 +114,19 @@ fn format_duration(total_seconds: u64) -> String {
         format!("{hours:02}:{minutes:02}:{seconds:02}")
     } else {
         format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+trait StrExt {
+    fn or_else_if_empty<'a>(&'a self, fallback: &'a str) -> &'a str;
+}
+
+impl StrExt for str {
+    fn or_else_if_empty<'a>(&'a self, fallback: &'a str) -> &'a str {
+        if self.is_empty() {
+            fallback
+        } else {
+            self
+        }
     }
 }

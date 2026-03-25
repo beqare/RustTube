@@ -24,15 +24,30 @@ function Update-CargoVersion {
     $patch = [int]$match.Groups[3].Value + 1
     $newVersion = "$major.$minor.$patch"
 
+    Set-CargoVersion -Version $newVersion
+    Write-Host "New version: $newVersion"
+    return @{
+        OldVersion = $match.Groups[1].Value + "." + $match.Groups[2].Value + "." + $match.Groups[3].Value
+        NewVersion = $newVersion
+    }
+}
+
+function Set-CargoVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Version
+    )
+
+    $cargoTomlPath = Join-Path $root "Cargo.toml"
+    $content = Get-Content -LiteralPath $cargoTomlPath -Raw
     $updated = [regex]::Replace(
         $content,
         '(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"',
-        ('version = "' + $newVersion + '"'),
+        ('version = "' + $Version + '"'),
         1
     )
 
     Set-Content -LiteralPath $cargoTomlPath -Value $updated -Encoding UTF8
-    Write-Host "New version: $newVersion"
 }
 
 function Read-CargoVersion {
@@ -54,7 +69,7 @@ function Build-AppPackage {
 
     cargo build --release
     if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+        throw "cargo build --release failed with exit code $LASTEXITCODE"
     }
 
     if (Test-Path $distDir) {
@@ -214,8 +229,16 @@ if ($Mode -eq "3") {
     Maybe-PublishGitHubRelease
 }
 else {
-    Update-CargoVersion
-    Build-AppPackage
+    $versionUpdate = Update-CargoVersion
+    try {
+        Build-AppPackage
+    }
+    catch {
+        Write-Host ""
+        Write-Host "Build failed. Restoring Cargo.toml version to $($versionUpdate.OldVersion)..."
+        Set-CargoVersion -Version $versionUpdate.OldVersion
+        throw
+    }
 }
 
 if ($Mode -eq "2") {

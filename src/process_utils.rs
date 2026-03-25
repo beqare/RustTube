@@ -72,6 +72,22 @@ pub fn run_command_streaming_with_handle(
         .spawn()
         .map_err(|error| format!("could not launch process: {error}"))?;
 
+    if let Some(slot) = &child_slot {
+        let mut child_guard = slot
+            .lock()
+            .map_err(|_| {
+                terminate_child_best_effort(&mut child);
+                "failed to lock child process handle".to_owned()
+            })?;
+        *child_guard = match register_active_process(&child) {
+            Ok(active_process) => Some(active_process),
+            Err(error) => {
+                terminate_child_best_effort(&mut child);
+                return Err(error);
+            }
+        };
+    }
+
     let stdout = child
         .stdout
         .take()
@@ -85,11 +101,6 @@ pub fn run_command_streaming_with_handle(
 
     let stdout_handle = spawn_stream_reader(stdout, sender.clone(), Arc::clone(&combined_output));
     let stderr_handle = spawn_stream_reader(stderr, sender.clone(), Arc::clone(&combined_output));
-
-    if let Some(slot) = &child_slot {
-        let mut child_guard = slot.lock().map_err(|_| "failed to lock child process handle".to_owned())?;
-        *child_guard = Some(register_active_process(&child)?);
-    }
 
     let status = child
         .wait()
@@ -110,6 +121,11 @@ pub fn run_command_streaming_with_handle(
     }
 
     Ok((status.success(), output))
+}
+
+fn terminate_child_best_effort(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 pub fn cancel_child_process(slot: &Arc<Mutex<Option<ActiveProcess>>>) -> Result<bool, String> {
