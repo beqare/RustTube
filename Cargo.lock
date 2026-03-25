@@ -3051,7 +3051,7 @@ dependencies = [
 
 [[package]]
 name = "rusttube_gui"
-version = "1.1.6"
+version = "1.1.7"
 dependencies = [
  "directories",
  "eframe",
