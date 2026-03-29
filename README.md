@@ -94,8 +94,9 @@ scripts\build.bat
 - `2` = Build app package + installer
 - `3` = Build installer only
 - `4` = Build app package + installer + upload both release files
+- `5` = Build app package + installer + zip + upload all release files
 
-When using build mode `1`, `2`, or `4`, the script automatically increases the patch version in `Cargo.toml`.
+When using build mode `1`, `2`, `4`, or `5`, the script automatically increases the patch version in `Cargo.toml`.
 
 ## Installer
 
@@ -123,6 +124,8 @@ If GitHub CLI is installed and authenticated, the build script can optionally:
 
 - create a GitHub release
 - upload `RustTube-Setup.exe`
+- upload `RustTube.exe`
+- upload `RustTube.zip`
 
 This is available after an installer build.
 

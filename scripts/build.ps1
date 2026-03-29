@@ -115,6 +115,39 @@ function Build-Installer {
     }
 }
 
+function Build-ReleaseZip {
+    $appExePath = Join-Path $root "dist\RustTube\RustTube.exe"
+    $installerPath = Join-Path $root "dist\installer\RustTube-Setup.exe"
+    $zipPath = Join-Path $root "dist\RustTube.zip"
+    $stagingDir = Join-Path $root "dist\zip-staging"
+
+    if (-not (Test-Path $appExePath)) {
+        throw "App file was not found at $appExePath"
+    }
+
+    if (-not (Test-Path $installerPath)) {
+        throw "Installer file was not found at $installerPath"
+    }
+
+    if (Test-Path $stagingDir) {
+        Remove-Item -LiteralPath $stagingDir -Recurse -Force
+    }
+
+    New-Item -ItemType Directory -Path $stagingDir | Out-Null
+    Copy-Item -LiteralPath $appExePath -Destination (Join-Path $stagingDir "RustTube.exe")
+    Copy-Item -LiteralPath $installerPath -Destination (Join-Path $stagingDir "RustTube-Setup.exe")
+
+    if (Test-Path $zipPath) {
+        Remove-Item -LiteralPath $zipPath -Force
+    }
+
+    Compress-Archive -Path (Join-Path $stagingDir "*") -DestinationPath $zipPath -Force
+    Remove-Item -LiteralPath $stagingDir -Recurse -Force
+
+    Write-Host ""
+    Write-Host "Release zip created:" $zipPath
+}
+
 function Find-GitHubCli {
     $ghCommand = Get-Command gh.exe -ErrorAction SilentlyContinue
     if (-not $ghCommand) {
@@ -143,13 +176,16 @@ function Find-GitHubCli {
 function Publish-GitHubReleaseIfRequested {
     param(
         [Parameter(Mandatory = $false)]
-        [bool]$IncludeAppExe = $false
+        [bool]$IncludeAppExe = $false,
+        [Parameter(Mandatory = $false)]
+        [bool]$IncludeZip = $false
     )
 
     $appVersion = Read-CargoVersion
     $tagName = "v$appVersion"
     $appExePath = Join-Path $root "dist\RustTube\RustTube.exe"
     $installerPath = Join-Path $root "dist\installer\RustTube-Setup.exe"
+    $zipPath = Join-Path $root "dist\RustTube.zip"
     $releaseAssets = @()
 
     if (-not (Test-Path $installerPath)) {
@@ -164,6 +200,14 @@ function Publish-GitHubReleaseIfRequested {
         }
 
         $releaseAssets += $appExePath
+    }
+
+    if ($IncludeZip) {
+        if (-not (Test-Path $zipPath)) {
+            throw "Zip file was not found at $zipPath"
+        }
+
+        $releaseAssets += $zipPath
     }
 
     $assetNames = ($releaseAssets | ForEach-Object { Split-Path $_ -Leaf }) -join ", "
@@ -227,12 +271,13 @@ if ([string]::IsNullOrWhiteSpace($Mode)) {
     Write-Host "  2. Build the app and setup"
     Write-Host "  3. Build only the setup"
     Write-Host "  4. Build app, setup and upload both files"
+    Write-Host "  5. Build app, setup, zip and upload all files"
     Write-Host ""
-    $Mode = Read-Host "Choose 0, 1, 2, 3 or 4"
+    $Mode = Read-Host "Choose 0, 1, 2, 3, 4 or 5"
 }
 
-if ($Mode -notin @("0", "1", "2", "3", "4")) {
-    throw "Invalid selection. Please run again and choose 0, 1, 2, 3 or 4."
+if ($Mode -notin @("0", "1", "2", "3", "4", "5")) {
+    throw "Invalid selection. Please run again and choose 0, 1, 2, 3, 4 or 5."
 }
 
 if ($Mode -eq "0") {
@@ -260,13 +305,18 @@ else {
     }
 }
 
-if ($Mode -eq "2" -or $Mode -eq "4") {
+if ($Mode -eq "2" -or $Mode -eq "4" -or $Mode -eq "5") {
     Build-Installer
     Write-Host ""
     Write-Host "Installer build finished successfully."
     Write-Host "Installer output should be in dist\installer"
-    Publish-GitHubReleaseIfRequested -IncludeAppExe ($Mode -eq "4")
-    if ($Mode -eq "4") {
+
+    if ($Mode -eq "5") {
+        Build-ReleaseZip
+    }
+
+    Publish-GitHubReleaseIfRequested -IncludeAppExe ($Mode -in @("4", "5")) -IncludeZip ($Mode -eq "5")
+    if ($Mode -eq "4" -or $Mode -eq "5") {
         Write-Host ""
         Write-Host "App and setup build finished successfully."
     }
