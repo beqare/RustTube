@@ -63,13 +63,8 @@ function Read-CargoVersion {
 }
 
 function Build-AppPackage {
-    param(
-        [Parameter(Mandatory = $false)]
-        [string]$OutputDir = "dist\RustTube"
-    )
-
     $releaseDir = Join-Path $root "target\release"
-    $distDir = Join-Path $root $OutputDir
+    $distDir = Join-Path $root "dist\RustTube"
     $exeName = "RustTube.exe"
 
     cargo build --release
@@ -146,15 +141,33 @@ function Find-GitHubCli {
 }
 
 function Publish-GitHubReleaseIfRequested {
+    param(
+        [Parameter(Mandatory = $false)]
+        [bool]$IncludeAppExe = $false
+    )
+
     $appVersion = Read-CargoVersion
     $tagName = "v$appVersion"
+    $appExePath = Join-Path $root "dist\RustTube\RustTube.exe"
     $installerPath = Join-Path $root "dist\installer\RustTube-Setup.exe"
+    $releaseAssets = @()
 
     if (-not (Test-Path $installerPath)) {
         throw "Installer file was not found at $installerPath"
     }
 
-    $answer = Read-Host "Create GitHub release $tagName and upload RustTube-Setup.exe? (y/n)"
+    $releaseAssets += $installerPath
+
+    if ($IncludeAppExe) {
+        if (-not (Test-Path $appExePath)) {
+            throw "App file was not found at $appExePath"
+        }
+
+        $releaseAssets += $appExePath
+    }
+
+    $assetNames = ($releaseAssets | ForEach-Object { Split-Path $_ -Leaf }) -join ", "
+    $answer = Read-Host "Create GitHub release $tagName and upload $assetNames? (y/n)"
     if ($answer -notmatch '^(y|yes)$') {
         Write-Host ""
         Write-Host "Skipped GitHub release creation."
@@ -175,10 +188,10 @@ function Publish-GitHubReleaseIfRequested {
     }
 
     if ($releaseExists) {
-        & $gh release upload $tagName $installerPath --clobber
+        & $gh release upload $tagName @releaseAssets --clobber
     }
     else {
-        & $gh release create $tagName $installerPath --title $tagName --generate-notes
+        & $gh release create $tagName @releaseAssets --title $tagName --generate-notes
     }
 
     if ($LASTEXITCODE -ne 0) {
@@ -208,14 +221,14 @@ function Test-GitHubCliSetup {
 
 if ([string]::IsNullOrWhiteSpace($Mode)) {
     Write-Host ""
-    Write-Host "Select an action:"
-    Write-Host "  0. Check GitHub CLI"
-    Write-Host "  1. Build app package"
-    Write-Host "  2. Build app package + installer"
-    Write-Host "  3. Build installer only"
-    Write-Host "  4. Build portable package"
+    Write-Host "What do you want to build?"
+    Write-Host "  0. Check GitHub release login"
+    Write-Host "  1. Build the app"
+    Write-Host "  2. Build the app and setup"
+    Write-Host "  3. Build only the setup"
+    Write-Host "  4. Build app, setup and upload both files"
     Write-Host ""
-    $Mode = Read-Host "Enter 0, 1, 2, 3 or 4"
+    $Mode = Read-Host "Choose 0, 1, 2, 3 or 4"
 }
 
 if ($Mode -notin @("0", "1", "2", "3", "4")) {
@@ -237,12 +250,7 @@ if ($Mode -eq "3") {
 else {
     $versionUpdate = Update-CargoVersion
     try {
-        if ($Mode -eq "4") {
-            Build-AppPackage -OutputDir "dist\portable"
-        }
-        else {
-            Build-AppPackage
-        }
+        Build-AppPackage
     }
     catch {
         Write-Host ""
@@ -252,19 +260,18 @@ else {
     }
 }
 
-if ($Mode -eq "2") {
+if ($Mode -eq "2" -or $Mode -eq "4") {
     Build-Installer
     Write-Host ""
     Write-Host "Installer build finished successfully."
     Write-Host "Installer output should be in dist\installer"
-    Publish-GitHubReleaseIfRequested
+    Publish-GitHubReleaseIfRequested -IncludeAppExe ($Mode -eq "4")
+    if ($Mode -eq "4") {
+        Write-Host ""
+        Write-Host "App and setup build finished successfully."
+    }
 }
 elseif ($Mode -eq "1") {
     Write-Host ""
     Write-Host "Build finished successfully."
-}
-elseif ($Mode -eq "4") {
-    Write-Host ""
-    Write-Host "Portable build finished successfully."
-    Write-Host "Portable output should be in dist\portable"
 }

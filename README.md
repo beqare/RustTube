@@ -93,7 +93,7 @@ scripts\build.bat
 - `1` = Build app package
 - `2` = Build app package + installer
 - `3` = Build installer only
-- `4` = Build portable package
+- `4` = Build app package + installer + upload both release files
 
 When using build mode `1`, `2`, or `4`, the script automatically increases the patch version in `Cargo.toml`.
 
