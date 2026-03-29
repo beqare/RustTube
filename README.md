@@ -93,15 +93,16 @@ scripts\build.bat
 - `1` = Build app package
 - `2` = Build app package + installer
 - `3` = Build installer only
+- `4` = Build portable package
 
-When using build mode `1` or `2`, the script automatically increases the patch version in `Cargo.toml`.
+When using build mode `1`, `2`, or `4`, the script automatically increases the patch version in `Cargo.toml`.
 
 ## Installer
 
 The installer is built with Inno Setup and installs RustTube into:
 
 ```text
-AppData\Roaming\JonasGrimm\RustTube
+AppData\Roaming\jonasgrimm.de\RustTube
 ```
 
 The uninstaller is configured to remove the `RustTube` folder again on uninstall.
@@ -111,7 +112,7 @@ The uninstaller is configured to remove the `RustTube` folder again on uninstall
 RustTube stores its downloaded helper tools in:
 
 ```text
-AppData\Roaming\JonasGrimm\RustTube\tools
+AppData\Roaming\jonasgrimm.de\RustTube\tools
 ```
 
 The app can also open the tool folder, settings folder, and program folder directly from the UI.

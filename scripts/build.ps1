@@ -63,8 +63,13 @@ function Read-CargoVersion {
 }
 
 function Build-AppPackage {
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$OutputDir = "dist\RustTube"
+    )
+
     $releaseDir = Join-Path $root "target\release"
-    $distDir = Join-Path $root "dist\RustTube"
+    $distDir = Join-Path $root $OutputDir
     $exeName = "RustTube.exe"
 
     cargo build --release
@@ -208,12 +213,13 @@ if ([string]::IsNullOrWhiteSpace($Mode)) {
     Write-Host "  1. Build app package"
     Write-Host "  2. Build app package + installer"
     Write-Host "  3. Build installer only"
+    Write-Host "  4. Build portable package"
     Write-Host ""
-    $Mode = Read-Host "Enter 0, 1, 2 or 3"
+    $Mode = Read-Host "Enter 0, 1, 2, 3 or 4"
 }
 
-if ($Mode -notin @("0", "1", "2", "3")) {
-    throw "Invalid selection. Please run again and choose 0, 1, 2 or 3."
+if ($Mode -notin @("0", "1", "2", "3", "4")) {
+    throw "Invalid selection. Please run again and choose 0, 1, 2, 3 or 4."
 }
 
 if ($Mode -eq "0") {
@@ -231,7 +237,12 @@ if ($Mode -eq "3") {
 else {
     $versionUpdate = Update-CargoVersion
     try {
-        Build-AppPackage
+        if ($Mode -eq "4") {
+            Build-AppPackage -OutputDir "dist\portable"
+        }
+        else {
+            Build-AppPackage
+        }
     }
     catch {
         Write-Host ""
@@ -251,4 +262,9 @@ if ($Mode -eq "2") {
 elseif ($Mode -eq "1") {
     Write-Host ""
     Write-Host "Build finished successfully."
+}
+elseif ($Mode -eq "4") {
+    Write-Host ""
+    Write-Host "Portable build finished successfully."
+    Write-Host "Portable output should be in dist\portable"
 }

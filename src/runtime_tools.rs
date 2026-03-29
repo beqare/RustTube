@@ -16,8 +16,8 @@ const FFMPEG_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-esse
 
 pub fn resolve_lib_dir() -> PathBuf {
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        return PathBuf::from(appdata)
-            .join("JonasGrimm")
+        return PathBuf::from(&appdata)
+            .join("jonasgrimm.de")
             .join("RustTube")
             .join("tools");
     }

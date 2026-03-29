@@ -3,7 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::app_model::{DownloadMode, QualityPreset};
@@ -110,12 +109,15 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
 }
 
 pub fn settings_dir_path() -> Option<PathBuf> {
-    let project_dirs = ProjectDirs::from("de", "JonasGrimm", "RustTube")?;
-    Some(project_dirs.config_dir().to_path_buf())
+    storage_root_path()
 }
 
 fn settings_file_path() -> Option<PathBuf> {
     Some(settings_dir_path()?.join("settings.json"))
+}
+
+fn storage_root_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|appdata| PathBuf::from(appdata).join("jonasgrimm.de").join("RustTube"))
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<(), String> {
